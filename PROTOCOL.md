@@ -1,12 +1,21 @@
-# Naim Streamer HTTP API — Protocol Analysis
+# Naim Streamer Control Protocols — Analysis
 
 Reverse-engineered from the Naim Android application (decompiled APK).
 All findings are based on static analysis of Retrofit interface declarations,
 Moshi JSON model classes, and enum definitions found in the decompiled source.
 
+Naim devices use **two distinct control protocols** depending on the device generation:
+
+| Protocol | Script | Devices | Port |
+|----------|--------|---------|------|
+| **REST API** | `naim_control_rest.py` | Newer devices (Uniti series, Mu-so 2nd gen, etc.) | 15081 |
+| **UPnP/DLNA** | `naim_control_upnp.py` | Legacy devices (SuperUniti, NDS, NDX, UnitiQute, etc.) | 8080 |
+
 ---
 
 ## Table of Contents
+
+### Part A — REST API (newer devices)
 
 1. [Transport Layer](#1-transport-layer)
 2. [Request & Response Conventions](#2-request--response-conventions)
@@ -31,7 +40,15 @@ Moshi JSON model classes, and enum definitions found in the decompiled source.
 11. [HTTP Client Behaviour](#11-http-client-behaviour)
 12. [Known Limitations & Notes](#12-known-limitations--notes)
 
+### Part B — UPnP/DLNA (legacy devices)
+
+13. [UPnP/DLNA Protocol Overview](#13-upnpdlna-protocol-overview)
+14. [UPnP Services & Control URLs](#14-upnp-services--control-urls)
+15. [SOAP Action Reference](#15-soap-action-reference)
+
 ---
+
+# Part A — REST API (newer devices)
 
 ## 1. Transport Layer
 
@@ -1190,3 +1207,126 @@ A separate Retrofit instance is created per device, so multi-device setups
 - **Partial PUT responses:** PUT requests that succeed typically return
   HTTP `200` with an empty body. The updated state must be read back with
   a subsequent GET if confirmation is needed.
+
+---
+
+# Part B — UPnP/DLNA (legacy devices)
+
+## 13. UPnP/DLNA Protocol Overview
+
+Legacy Naim devices (SuperUniti, NDS, NDX, UnitiQute, etc.) do not expose
+a REST API on port 15081. Instead, they implement standard **UPnP/DLNA**
+services controlled via **SOAP over HTTP**.
+
+| Property | Value |
+|----------|-------|
+| Protocol | HTTP/1.1 with SOAP XML |
+| Port | **8080** (typical, discovered via SSDP) |
+| Content-Type | `text/xml; charset="utf-8"` |
+| Authentication | None |
+| Discovery | SSDP multicast on 239.255.255.250:1900 |
+
+The device description is available at `http://<device-ip>:<port>/description.xml`
+and lists all supported UPnP services with their control URLs.
+
+---
+
+## 14. UPnP Services & Control URLs
+
+Legacy Naim devices expose two primary UPnP services:
+
+| Service | Service Type URN | Default Control URL |
+|---------|------------------|---------------------|
+| **AVTransport** | `urn:schemas-upnp-org:service:AVTransport:1` | `/AVTransport/ctrl` |
+| **RenderingControl** | `urn:schemas-upnp-org:service:RenderingControl:1` | `/RenderingControl/ctrl` |
+
+Control URLs should be discovered from `description.xml` rather than hardcoded,
+as they may vary between device models. The tool falls back to the defaults above
+if discovery fails.
+
+### SOAP Request Format
+
+All control commands are sent as HTTP POST with a SOAP XML envelope:
+
+```http
+POST /AVTransport/ctrl HTTP/1.1
+Host: 192.168.1.21:8080
+Content-Type: text/xml; charset="utf-8"
+SOAPAction: "urn:schemas-upnp-org:service:AVTransport:1#Play"
+
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+ s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+<s:Body>
+<u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+<InstanceID>0</InstanceID>
+<Speed>1</Speed>
+</u:Play>
+</s:Body>
+</s:Envelope>
+```
+
+### SOAP Response Format
+
+Responses are SOAP XML envelopes containing the action response element:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+ s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+<s:Body>
+<u:PlayResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+</u:PlayResponse>
+</s:Body>
+</s:Envelope>
+```
+
+### SOAP Fault Format
+
+Errors return a SOAP fault with a UPnP error code and description:
+
+```xml
+<s:Envelope ...>
+<s:Body>
+<s:Fault>
+<detail>
+<UPnPError xmlns="urn:schemas-upnp-org:control-1-0">
+<errorCode>501</errorCode>
+<errorDescription>Action Failed</errorDescription>
+</UPnPError>
+</detail>
+</s:Fault>
+</s:Body>
+</s:Envelope>
+```
+
+---
+
+## 15. SOAP Action Reference
+
+### AVTransport Actions
+
+All AVTransport actions use `InstanceID=0`.
+
+| Action | Arguments | Description |
+|--------|-----------|-------------|
+| `Play` | `Speed=1` | Start/resume playback |
+| `Pause` | — | Pause playback |
+| `Stop` | — | Stop playback |
+| `Next` | — | Skip to next track |
+| `Previous` | — | Skip to previous track |
+| `Seek` | `Unit=REL_TIME`, `Target=HH:MM:SS` | Seek to position |
+| `GetTransportInfo` | — | Returns: `CurrentTransportState`, `CurrentTransportStatus`, `CurrentSpeed` |
+| `GetPositionInfo` | — | Returns: `Track`, `TrackDuration`, `TrackMetaData`, `TrackURI`, `RelTime`, `AbsTime`, `RelCount`, `AbsCount` |
+| `GetMediaInfo` | — | Returns: `NrTracks`, `MediaDuration`, `CurrentURI`, `CurrentURIMetaData`, `NextURI`, `NextURIMetaData`, `PlayMedium`, `RecordMedium`, `WriteStatus` |
+
+### RenderingControl Actions
+
+All RenderingControl actions use `InstanceID=0` and `Channel=Master`.
+
+| Action | Arguments | Description |
+|--------|-----------|-------------|
+| `GetVolume` | — | Returns: `CurrentVolume` |
+| `SetVolume` | `DesiredVolume=<0-100>` | Set volume level |
+| `GetMute` | — | Returns: `CurrentMute` (0 or 1) |
+| `SetMute` | `DesiredMute=<0\|1>` | Set mute state |
