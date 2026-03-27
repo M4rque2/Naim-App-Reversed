@@ -20,6 +20,7 @@ NOTE: For input switching on legacy devices, use naim_control_nstream.py instead
 """
 
 import argparse
+import http.client
 import json
 import socket
 import sys
@@ -265,6 +266,9 @@ def _build_soap_envelope(service_type, action, args=None):
     args = args or {}
     arg_xml = ""
     for k, v in args.items():
+        # Escape XML special characters in values
+        if isinstance(v, str):
+            v = v.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         arg_xml += f"<{k}>{v}</{k}>"
     return (
         '<?xml version="1.0" encoding="utf-8"?>'
@@ -300,6 +304,8 @@ def _soap_request(host, port, path, service, action, args=None):
             raise UPnPError(f"HTTP {e.code} {e.reason}: {raw.decode(errors='replace')}")
     except urllib.error.URLError as e:
         raise UPnPError(f"Connection error: {e.reason}")
+    except http.client.RemoteDisconnected as e:
+        raise UPnPError(f"Device closed connection - device may be in standby or rejected the format")
 
 
 def _parse_soap_response(xml_data, action):
@@ -1083,6 +1089,590 @@ def cmd_upnp_protocol_info(args):
 
 
 # ─────────────────────────────────────────────
+# MEDIA SERVER BROWSING
+# ─────────────────────────────────────────────
+
+def _discover_media_servers(timeout=5):
+    """Discover UPnP Media Servers on the local network.
+    Returns a dict of location_url -> device_info."""
+    servers = {}
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.settimeout(timeout)
+
+    # Search specifically for MediaServer devices
+    search_targets = [
+        "urn:schemas-upnp-org:device:MediaServer:1",
+        "urn:schemas-upnp-org:device:MediaServer:2",
+        "urn:schemas-upnp-org:device:MediaServer:3",
+        "urn:schemas-upnp-org:device:MediaServer:4",
+    ]
+
+    for st in search_targets:
+        msg = (
+            "M-SEARCH * HTTP/1.1\r\n"
+            f"HOST: {SSDP_MULTICAST_ADDR}:{SSDP_PORT}\r\n"
+            'MAN: "ssdp:discover"\r\n'
+            "MX: 3\r\n"
+            f"ST: {st}\r\n"
+            "USER-AGENT: UPnP/1.0 NaimControl/1.0\r\n"
+            "\r\n"
+        )
+        sock.sendto(msg.encode(), (SSDP_MULTICAST_ADDR, SSDP_PORT))
+
+    deadline = time.time() + timeout
+    locations = {}
+    while time.time() < deadline:
+        try:
+            data, addr = sock.recvfrom(4096)
+            text = data.decode(errors="replace")
+            for line in text.splitlines():
+                low = line.lower()
+                if low.startswith("location:"):
+                    loc = line.split(":", 1)[1].strip()
+                    locations[loc] = addr[0]
+        except socket.timeout:
+            break
+    sock.close()
+
+    # Parse each discovered location to get device info
+    for location, ip in locations.items():
+        try:
+            req = urllib.request.Request(location, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                xml_data = resp.read()
+
+            root = ET.fromstring(xml_data)
+            ns = {"upnp": "urn:schemas-upnp-org:device-1-0"}
+
+            device = root.find(".//upnp:device", ns)
+            if device is None:
+                device = root.find(".//{urn:schemas-upnp-org:device-1-0}device")
+            if device is None:
+                continue
+
+            def txt(tag):
+                el = device.find(f"upnp:{tag}", ns)
+                if el is None:
+                    el = device.find(f"{{urn:schemas-upnp-org:device-1-0}}{tag}")
+                return el.text.strip() if el is not None and el.text else None
+
+            device_type = txt("deviceType") or ""
+            if "MediaServer" not in device_type:
+                continue
+
+            # Find ContentDirectory service
+            content_dir_url = None
+            for service in root.iter():
+                if service.tag.endswith("}service") or service.tag == "service":
+                    stype = None
+                    ctrl = None
+                    for child in service:
+                        ctag = child.tag
+                        if "}" in ctag:
+                            ctag = ctag.split("}", 1)[1]
+                        if ctag == "serviceType" and child.text:
+                            if "ContentDirectory" in child.text:
+                                stype = child.text
+                        elif ctag == "controlURL":
+                            ctrl = child.text
+                    if stype and ctrl:
+                        content_dir_url = ctrl
+                        break
+
+            # Extract base URL from location
+            from urllib.parse import urlparse
+            parsed = urlparse(location)
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+
+            servers[location] = {
+                "ip": ip,
+                "location": location,
+                "base_url": base_url,
+                "friendlyName": txt("friendlyName"),
+                "manufacturer": txt("manufacturer"),
+                "modelName": txt("modelName"),
+                "UDN": txt("UDN"),
+                "contentDirectoryURL": content_dir_url,
+            }
+        except Exception:
+            continue
+
+    return servers
+
+
+def _browse_media_server(base_url, control_url, object_id="0", start_index=0, count=30):
+    """Browse a UPnP Media Server's ContentDirectory.
+
+    Args:
+        base_url: The base URL of the server (e.g., http://192.168.1.100:9000)
+        control_url: The ContentDirectory control URL (e.g., /ContentDirectory/control)
+        object_id: The container ObjectID to browse (default: "0" = root)
+        start_index: Starting index for pagination
+        count: Number of items to request
+
+    Returns:
+        Dict with items, total count, etc.
+    """
+    # Build full control URL
+    if control_url.startswith("http"):
+        full_url = control_url
+    else:
+        full_url = f"{base_url}{control_url}"
+
+    # Parse host and port from URL
+    from urllib.parse import urlparse
+    parsed = urlparse(full_url)
+    host = parsed.hostname
+    port = parsed.port or 80
+    path = parsed.path
+
+    # Default filter for audio metadata
+    default_filter = (
+        "dc:date,upnp:genre,res,res@duration,res@size,upnp:albumArtURI,"
+        "upnp:album,upnp:artist,upnp:author,dc:creator,upnp:originalTrackNumber"
+    )
+
+    try:
+        result = _soap_request(
+            host, port, path,
+            UPNP_CONTENT_DIRECTORY, "Browse",
+            {
+                "ObjectID": object_id,
+                "BrowseFlag": "BrowseDirectChildren",
+                "Filter": default_filter,
+                "StartingIndex": str(start_index),
+                "RequestedCount": str(count),
+                "SortCriteria": "",
+            })
+    except UPnPError as e:
+        return {"error": str(e), "items": []}
+
+    # Parse the DIDL-Lite XML in the Result field
+    didl_xml = result.get("Result", "")
+    if not didl_xml:
+        return {
+            "items": [],
+            "total": result.get("TotalMatches", "0"),
+            "returned": result.get("NumberReturned", "0"),
+        }
+
+    items = _parse_didl_lite(didl_xml)
+    return {
+        "items": items,
+        "total": result.get("TotalMatches", "0"),
+        "returned": result.get("NumberReturned", "0"),
+        "updateID": result.get("UpdateID", "0"),
+    }
+
+
+def _search_media_server(base_url, control_url, container_id="0", search_criteria="*",
+                         start_index=0, count=30):
+    """Search a UPnP Media Server's ContentDirectory.
+
+    Args:
+        base_url: The base URL of the server
+        control_url: The ContentDirectory control URL
+        container_id: The container to search within (default: "0" = all)
+        search_criteria: UPnP search criteria string
+        start_index: Starting index for pagination
+        count: Number of items to request
+
+    Returns:
+        Dict with items, total count, etc.
+    """
+    # Build full control URL
+    if control_url.startswith("http"):
+        full_url = control_url
+    else:
+        full_url = f"{base_url}{control_url}"
+
+    from urllib.parse import urlparse
+    parsed = urlparse(full_url)
+    host = parsed.hostname
+    port = parsed.port or 80
+    path = parsed.path
+
+    default_filter = (
+        "dc:date,upnp:genre,res,res@duration,res@size,upnp:albumArtURI,"
+        "upnp:album,upnp:artist,upnp:author,dc:creator,upnp:originalTrackNumber"
+    )
+
+    try:
+        result = _soap_request(
+            host, port, path,
+            UPNP_CONTENT_DIRECTORY, "Search",
+            {
+                "ContainerID": container_id,
+                "SearchCriteria": search_criteria,
+                "Filter": default_filter,
+                "StartingIndex": str(start_index),
+                "RequestedCount": str(count),
+                "SortCriteria": "",
+            })
+    except UPnPError as e:
+        return {"error": str(e), "items": []}
+
+    didl_xml = result.get("Result", "")
+    if not didl_xml:
+        return {
+            "items": [],
+            "total": result.get("TotalMatches", "0"),
+            "returned": result.get("NumberReturned", "0"),
+        }
+
+    items = _parse_didl_lite(didl_xml)
+    return {
+        "items": items,
+        "total": result.get("TotalMatches", "0"),
+        "returned": result.get("NumberReturned", "0"),
+    }
+
+
+def cmd_media_servers(args):
+    """Discover UPnP Media Servers on the local network."""
+    timeout = args.timeout if hasattr(args, "timeout") else 5
+    print(f"Scanning for UPnP Media Servers (timeout={timeout}s)...\n")
+
+    servers = _discover_media_servers(timeout)
+
+    if not servers:
+        print("No UPnP Media Servers found on the network.")
+        print("\nMake sure you have a DLNA/UPnP server running, such as:")
+        print("  - MiniDLNA / ReadyMedia")
+        print("  - Plex Media Server")
+        print("  - Jellyfin")
+        print("  - Roon Server")
+        print("  - Asset UPnP")
+        print("  - Synology Media Server")
+        return
+
+    print(f"Found {len(servers)} Media Server(s):\n")
+    for i, (location, info) in enumerate(servers.items(), 1):
+        name = info.get("friendlyName") or info.get("modelName") or "Unknown"
+        manufacturer = info.get("manufacturer") or ""
+        ip = info.get("ip", "?")
+        udn = info.get("UDN", "")
+
+        print(f"  [{i}] {name}")
+        print(f"      IP: {ip}")
+        if manufacturer:
+            print(f"      Manufacturer: {manufacturer}")
+        print(f"      Location: {location}")
+        if info.get("contentDirectoryURL"):
+            print(f"      ContentDirectory: {info['contentDirectoryURL']}")
+        print()
+
+
+def cmd_server_browse(args):
+    """Browse a UPnP Media Server by its IP address."""
+    server_ip = args.server
+    object_id = args.object_id
+    start = args.start
+    count = args.count
+
+    print(f"Discovering Media Server at {server_ip}...")
+
+    # First discover the server to get its ContentDirectory URL
+    servers = _discover_media_servers(timeout=3)
+
+    # Find the server matching the IP
+    server_info = None
+    for loc, info in servers.items():
+        if info.get("ip") == server_ip:
+            server_info = info
+            break
+
+    if not server_info:
+        print(f"No Media Server found at {server_ip}")
+        print("Use 'media-servers' command to discover available servers.")
+        return
+
+    base_url = server_info.get("base_url")
+    control_url = server_info.get("contentDirectoryURL")
+
+    if not control_url:
+        print("Server does not expose ContentDirectory service.")
+        return
+
+    server_name = server_info.get("friendlyName") or server_ip
+    print(f"Browsing '{server_name}' (ObjectID: {object_id})\n")
+
+    result = _browse_media_server(base_url, control_url, object_id, start, count)
+
+    if result.get("error"):
+        print(f"Error: {result['error']}")
+        return
+
+    total = result.get("total", "?")
+    returned = result.get("returned", "?")
+    print(f"Items {start+1}-{start+int(returned)} of {total}:\n")
+
+    for item in result.get("items", []):
+        item_type = "[D]" if item["type"] == "container" else "[F]"
+        item_id = item.get("id", "?")
+        title = item.get("title", "Unknown")
+
+        print(f"  {item_type} [{item_id}] {title}")
+
+        # Show metadata for tracks
+        if item["type"] == "item":
+            if item.get("artist"):
+                print(f"       Artist: {item['artist']}")
+            if item.get("album"):
+                print(f"       Album: {item['album']}")
+            if item.get("res"):
+                res = item["res"][0]
+                url = res.get("url", "")
+                protocol = res.get("protocolInfo", "")
+                # Truncate long URLs
+                if len(url) > 60:
+                    url = url[:57] + "..."
+                print(f"       URL: {url}")
+
+    if int(returned) < int(total):
+        next_start = start + int(returned)
+        print(f"\n  (Use --start {next_start} to see more)")
+
+
+def cmd_server_search(args):
+    """Search a UPnP Media Server for content."""
+    server_ip = args.server
+    query = args.query
+
+    print(f"Discovering Media Server at {server_ip}...")
+
+    servers = _discover_media_servers(timeout=3)
+    server_info = None
+    for loc, info in servers.items():
+        if info.get("ip") == server_ip:
+            server_info = info
+            break
+
+    if not server_info:
+        print(f"No Media Server found at {server_ip}")
+        return
+
+    base_url = server_info.get("base_url")
+    control_url = server_info.get("contentDirectoryURL")
+
+    if not control_url:
+        print("Server does not expose ContentDirectory service.")
+        return
+
+    # Build UPnP search criteria
+    # Common search criteria examples:
+    # - dc:title contains "keyword"
+    # - upnp:artist contains "artist"
+    # - upnp:album contains "album"
+    # - upnp:class derivedfrom "object.item.audioItem"
+    search_criteria = f'dc:title contains "{query}" or upnp:artist contains "{query}" or upnp:album contains "{query}"'
+
+    server_name = server_info.get("friendlyName") or server_ip
+    print(f"Searching '{server_name}' for: {query}\n")
+
+    result = _search_media_server(base_url, control_url, "0", search_criteria, 0, 50)
+
+    if result.get("error"):
+        # Search might not be supported, fall back to message
+        print(f"Search not supported or failed: {result['error']}")
+        print("\nTry browsing instead: server-browse --server <ip>")
+        return
+
+    total = result.get("total", "0")
+    print(f"Found {total} result(s):\n")
+
+    for item in result.get("items", []):
+        item_type = "[D]" if item["type"] == "container" else "[F]"
+        item_id = item.get("id", "?")
+        title = item.get("title", "Unknown")
+
+        print(f"  {item_type} [{item_id}] {title}")
+        if item.get("artist"):
+            print(f"       Artist: {item['artist']}")
+        if item.get("album"):
+            print(f"       Album: {item['album']}")
+
+
+def cmd_server_play(args):
+    """Play a track from a UPnP Media Server on a Naim device.
+
+    This command:
+    1. Gets the track's resource URL from the Media Server
+    2. Sets it as the AVTransport URI on the Naim renderer
+    3. Starts playback
+    """
+    server_ip = args.server
+    object_id = args.object_id
+    renderer_ip = args.host
+    renderer_port = args.port
+
+    if not renderer_ip:
+        print("Error: --host is required to specify the Naim renderer")
+        return
+
+    print(f"Getting track info from Media Server at {server_ip}...")
+
+    # Discover the server
+    servers = _discover_media_servers(timeout=3)
+    server_info = None
+    for loc, info in servers.items():
+        if info.get("ip") == server_ip:
+            server_info = info
+            break
+
+    if not server_info:
+        print(f"No Media Server found at {server_ip}")
+        return
+
+    base_url = server_info.get("base_url")
+    control_url = server_info.get("contentDirectoryURL")
+
+    if not control_url:
+        print("Server does not expose ContentDirectory service.")
+        return
+
+    # Build full control URL
+    if control_url.startswith("http"):
+        full_url = control_url
+    else:
+        full_url = f"{base_url}{control_url}"
+
+    from urllib.parse import urlparse
+    parsed = urlparse(full_url)
+    host = parsed.hostname
+    port = parsed.port or 80
+    path = parsed.path
+
+    # Get metadata for the specific object
+    try:
+        result = _soap_request(
+            host, port, path,
+            UPNP_CONTENT_DIRECTORY, "Browse",
+            {
+                "ObjectID": object_id,
+                "BrowseFlag": "BrowseMetadata",
+                "Filter": "*",
+                "StartingIndex": "0",
+                "RequestedCount": "1",
+                "SortCriteria": "",
+            })
+    except UPnPError as e:
+        print(f"Error browsing server: {e}")
+        return
+
+    didl_xml = result.get("Result", "")
+    if not didl_xml:
+        print("No item found with that ObjectID")
+        return
+
+    items = _parse_didl_lite(didl_xml)
+    if not items:
+        print("Could not parse item metadata")
+        return
+
+    item = items[0]
+    title = item.get("title", "Unknown")
+    artist = item.get("artist", "")
+
+    if not item.get("res"):
+        print(f"Item '{title}' has no playable resource URL")
+        if item["type"] == "container":
+            print("This is a container (folder), not a playable item.")
+            print(f"Use: server-browse --server {server_ip} --object-id {object_id}")
+        return
+
+    res_info = item["res"][0]
+    resource_url = res_info.get("url")
+    protocol_info = res_info.get("protocolInfo", "")
+    sample_freq = res_info.get("sampleFrequency")
+
+    print(f"Track: {title}")
+    if artist:
+        print(f"Artist: {artist}")
+    print(f"URL: {resource_url}")
+    if protocol_info:
+        print(f"Format: {protocol_info}")
+    if sample_freq:
+        print(f"Sample Rate: {sample_freq} Hz")
+
+    # Check format compatibility for SuperUniti
+    url_lower = resource_url.lower() if resource_url else ""
+    is_dsd = ".dsf" in url_lower or ".dff" in url_lower or "dsd" in protocol_info.lower()
+
+    if is_dsd and sample_freq:
+        try:
+            freq = int(sample_freq)
+            # DSD64 = 2.8MHz, DSD128 = 5.6MHz, DSD256 = 11.2MHz+
+            if freq > 6144000:  # Above DSD128
+                print(f"\n[WARNING] This DSD file ({freq} Hz) may be DSD256 or higher!")
+                print("SuperUniti only supports DSD64 and DSD128.")
+                print("Attempting playback anyway - device may reject it.\n")
+        except ValueError:
+            pass
+
+    # Set AVTransport URI on the Naim renderer
+    print(f"\nSending to Naim renderer at {renderer_ip}...")
+
+    paths = _discover_upnp_services(renderer_ip, renderer_port)
+
+    # XML escape helper
+    def xml_escape(s):
+        if not s:
+            return ""
+        return (s.replace("&", "&amp;")
+                 .replace("<", "&lt;")
+                 .replace(">", "&gt;")
+                 .replace('"', "&quot;")
+                 .replace("'", "&apos;"))
+
+    # Build DIDL-Lite metadata with proper escaping
+    metadata = (
+        '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" '
+        'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
+        f'<item id="{xml_escape(object_id)}" parentID="0" restricted="1">'
+        f'<dc:title>{xml_escape(title)}</dc:title>'
+        '<upnp:class>object.item.audioItem.musicTrack</upnp:class>'
+    )
+    if artist:
+        metadata += f'<upnp:artist>{xml_escape(artist)}</upnp:artist>'
+    if item.get("album"):
+        metadata += f'<upnp:album>{xml_escape(item["album"])}</upnp:album>'
+    if item.get("albumArtURI"):
+        metadata += f'<upnp:albumArtURI>{xml_escape(item["albumArtURI"])}</upnp:albumArtURI>'
+    # Add resource with escaped URL
+    if not protocol_info:
+        protocol_info = "http-get:*:audio/mpeg:*"
+    metadata += f'<res protocolInfo="{xml_escape(protocol_info)}">{xml_escape(resource_url)}</res>'
+    metadata += '</item></DIDL-Lite>'
+
+    try:
+        _soap_request(
+            renderer_ip, renderer_port, paths[UPNP_AV_TRANSPORT],
+            UPNP_AV_TRANSPORT, "SetAVTransportURI",
+            {
+                "InstanceID": "0",
+                "CurrentURI": resource_url,
+                "CurrentURIMetaData": metadata,
+            })
+        print("URI set successfully!")
+    except UPnPError as e:
+        print(f"Error setting URI: {e}")
+        return
+
+    # Start playback
+    try:
+        _soap_request(
+            renderer_ip, renderer_port, paths[UPNP_AV_TRANSPORT],
+            UPNP_AV_TRANSPORT, "Play",
+            {"InstanceID": "0", "Speed": "1"})
+        print("Playback started!")
+    except UPnPError as e:
+        print(f"Error starting playback: {e}")
+
+
+# ─────────────────────────────────────────────
 # CLI SETUP
 # ─────────────────────────────────────────────
 
@@ -1211,6 +1801,37 @@ For newer devices (Uniti series, Mu-so 2nd gen):
 
     p = sub.add_parser("protocol-info", help="Show supported protocols (ConnectionManager)")
     p.set_defaults(func=cmd_upnp_protocol_info)
+
+    # ── MEDIA SERVER BROWSING ──
+    p = sub.add_parser("media-servers", help="Discover UPnP Media Servers on the network")
+    p.add_argument("--timeout", type=int, default=5,
+                   help="Discovery timeout in seconds (default: 5)")
+    p.set_defaults(func=cmd_media_servers)
+
+    p = sub.add_parser("server-browse", help="Browse a UPnP Media Server's content")
+    p.add_argument("--server", "-s", required=True,
+                   help="Media Server IP address")
+    p.add_argument("--object-id", "-o", default="0",
+                   help="ObjectID to browse (default: 0 = root)")
+    p.add_argument("--start", type=int, default=0,
+                   help="Starting index for pagination (default: 0)")
+    p.add_argument("--count", type=int, default=30,
+                   help="Number of items to retrieve (default: 30)")
+    p.set_defaults(func=cmd_server_browse)
+
+    p = sub.add_parser("server-search", help="Search a UPnP Media Server for content")
+    p.add_argument("--server", "-s", required=True,
+                   help="Media Server IP address")
+    p.add_argument("--query", "-q", required=True,
+                   help="Search query (matches title, artist, album)")
+    p.set_defaults(func=cmd_server_search)
+
+    p = sub.add_parser("server-play", help="Play a track from a Media Server on a Naim renderer")
+    p.add_argument("--server", "-s", required=True,
+                   help="Media Server IP address")
+    p.add_argument("--object-id", "-o", required=True,
+                   help="ObjectID of the track to play")
+    p.set_defaults(func=cmd_server_play)
 
     args = parser.parse_args()
     # --host is required for all commands except these

@@ -231,23 +231,56 @@ Before NVM commands work, the connection MUST be initialized:
 
 ### NVM Commands
 
+**Input Control:**
+| Command | Description |
+|---------|-------------|
+| `*NVM SETINPUT <input>\r` | Switch to specified input |
+| `*NVM GETINPUT\r` | Get current input |
+| `*NVM INPUT+\r` / `*NVM INPUT-\r` | Cycle inputs |
+| `*NVM GETINPUTBLK\r` | Get all inputs (bulk query) |
+| `*NVM SETINPUTENABLED <input> ON\|OFF\r` | Enable/disable an input |
+| `*NVM SETINPUTNAME <input> "<name>"\r` | Set input display name |
+
+**Volume/Preamp:**
+| Command | Description |
+|---------|-------------|
+| `*NVM VOL+\r` / `*NVM VOL-\r` | Volume up/down |
+| `*NVM SETRVOL <level>\r` | Set volume (0-100) |
+| `*NVM SETMUTE ON\|OFF\r` | Set mute state |
+| `*NVM GETAMPMAXVOL\r` / `*NVM SETAMPMAXVOL <level>\r` | Max amplifier volume limit |
+| `*NVM GETHEADMAXVOL\r` | Max headphone volume limit |
+| `*NVM GETBAL\r` / `*NVM SETBAL <level>\r` | Audio balance |
+| `*NVM GETPREAMP\r` | Get preamp status |
+
+**Playback:**
+| Command | Description |
+|---------|-------------|
+| `*NVM PLAY\r` / `*NVM STOP\r` | Start/stop playback |
+| `*NVM PAUSE TOGGLE\r` | Toggle pause |
+| `*NVM NEXTTRACK\r` / `*NVM PREVTRACK\r` | Skip tracks |
+
+**Bluetooth:**
+| Command | Description |
+|---------|-------------|
+| `*NVM BTSTATUS\r` | Get Bluetooth status |
+| `*NVM BTPAIR\r` / `*NVM BTPAIR EXIT\r` | Pairing mode |
+| `*NVM BTDROPLINK\r` / `*NVM BTDROPLINK FORGET\r` | Disconnect/forget device |
+| `*NVM GETBTNAME\r` / `*NVM SETBTNAME "<name>"\r` | Bluetooth device name |
+
+**Device Info:**
 | Command | Description |
 |---------|-------------|
 | `*NVM PRODUCT\r` | Get product type |
 | `*NVM VERSION\r` | Get firmware version |
-| `*NVM SETINPUT <input>\r` | Switch to specified input |
-| `*NVM GETINPUT\r` | Get current input |
-| `*NVM INPUT+\r` | Cycle to next input |
-| `*NVM INPUT-\r` | Cycle to previous input |
-| `*NVM GETINPUTBLK\r` | Get all inputs (bulk query) |
-| `*NVM SETINPUTENABLED <input> ON\|OFF\r` | Enable/disable an input |
-| `*NVM GETINPUTENABLED <input>\r` | Check if input is enabled |
-| `*NVM SETINPUTNAME <input> "<name>"\r` | Set input display name/alias |
-| `*NVM GETINPUTNAME <input>\r` | Get input display name |
-| `*NVM SETUNSOLICITED ON\r` | Enable unsolicited messages |
-| `*NVM VOL+\r` / `*NVM VOL-\r` | Volume up/down |
-| `*NVM GETPREAMP\r` | Get preamp status |
 | `*NVM GETMAC\r` | Get MAC address |
+| `*NVM GETROOMNAME\r` / `*NVM SETROOMNAME "<name>"\r` | Room/device name |
+
+**System:**
+| Command | Description |
+|---------|-------------|
+| `*NVM SETUNSOLICITED ON\r` | Enable unsolicited messages (required for init) |
+| `*NVM SETSTANDBY ON\|OFF\r` | Standby control |
+| `*NVM SYNCDISP ON\|OFF\r` | Enable/disable display sync (wakes up display like app interaction) |
 
 ### Valid Input Names
 
@@ -272,29 +305,44 @@ Before NVM commands work, the connection MUST be initialized:
 ### CLI Tool
 
 ```bash
-# Use naim_control_nstream.py for n-Stream operations
-./naim_control_nstream.py --host 192.168.1.21 inputs              # List all inputs on device
-./naim_control_nstream.py --host 192.168.1.21 set-input --input DIGITAL2
-./naim_control_nstream.py --host 192.168.1.21 set-input --input UPNP
-./naim_control_nstream.py --host 192.168.1.21 get-input
-./naim_control_nstream.py --host 192.168.1.21 input-up
-./naim_control_nstream.py --host 192.168.1.21 input-down
+# Input control
+./naim_control_nstream.py --host 192.168.1.48 inputs              # List all inputs on device
+./naim_control_nstream.py --host 192.168.1.48 set-input --input DIGITAL2
+./naim_control_nstream.py --host 192.168.1.48 get-input
+./naim_control_nstream.py --host 192.168.1.48 input-up / input-down
 
 # Input management
-./naim_control_nstream.py --host 192.168.1.21 input-enable --input DIGITAL1
-./naim_control_nstream.py --host 192.168.1.21 input-disable --input DIGITAL1
-./naim_control_nstream.py --host 192.168.1.21 input-enabled --input DIGITAL1
-./naim_control_nstream.py --host 192.168.1.21 input-rename --input DIGITAL1 --name "TV Audio"
-./naim_control_nstream.py --host 192.168.1.21 input-name --input DIGITAL1
+./naim_control_nstream.py --host 192.168.1.48 input-enable --input DIGITAL1
+./naim_control_nstream.py --host 192.168.1.48 input-disable --input DIGITAL1
+./naim_control_nstream.py --host 192.168.1.48 input-rename --input DIGITAL1 --name "TV Audio"
+
+# Volume control
+./naim_control_nstream.py --host 192.168.1.48 vol-up / vol-down
+./naim_control_nstream.py --host 192.168.1.48 vol-set --level 50
+./naim_control_nstream.py --host 192.168.1.48 mute / unmute
+./naim_control_nstream.py --host 192.168.1.48 max-vol-get
+./naim_control_nstream.py --host 192.168.1.48 max-vol-set --level 80
+./naim_control_nstream.py --host 192.168.1.48 balance-get / balance-set --level 0
+
+# Playback control
+./naim_control_nstream.py --host 192.168.1.48 play / pause / stop
+./naim_control_nstream.py --host 192.168.1.48 next / prev
+
+# Bluetooth
+./naim_control_nstream.py --host 192.168.1.48 bt-status
+./naim_control_nstream.py --host 192.168.1.48 bt-pair / bt-pair-exit
+./naim_control_nstream.py --host 192.168.1.48 bt-name-get / bt-name-set --name "My Naim"
+
+# Display wake-up (lights up display like app interaction)
+./naim_control_nstream.py --host 192.168.1.48 sync-display-on
+./naim_control_nstream.py --host 192.168.1.48 sync-display-off
+
+# Device settings
+./naim_control_nstream.py --host 192.168.1.48 room-name-get / room-name-set --name "Living Room"
+./naim_control_nstream.py --host 192.168.1.48 standby / wakeup
 
 # Device info
-./naim_control_nstream.py --host 192.168.1.21 product
-./naim_control_nstream.py --host 192.168.1.21 version
-./naim_control_nstream.py --host 192.168.1.21 mac
-./naim_control_nstream.py --host 192.168.1.21 preamp
-
-# Use -v for verbose debug output
-./naim_control_nstream.py --host 192.168.1.21 set-input --input DIGITAL2 -v
+./naim_control_nstream.py --host 192.168.1.48 product / version / mac / preamp
 ```
 
 **Detailed Documentation:** See `PROTOCOLS_DETAILED.md`, Section 21

@@ -8,7 +8,8 @@ There are **two separate scripts** for the two protocol generations:
 | Script | Protocol | Devices | Default Port |
 |--------|----------|---------|-------------|
 | `naim_control_rest.py` | HTTP REST API | Newer devices (Uniti series, Mu-so 2nd gen, etc.) | 15081 |
-| `naim_control_upnp.py` | UPnP/DLNA SOAP | Legacy devices (SuperUniti, NDS, NDX, UnitiQute, etc.) | 8080 |
+| `naim_control_upnp.py` | UPnP/DLNA SOAP | All devices (playback, volume, media servers) | 8080 |
+| `naim_control_nstream.py` | n-Stream/BridgeCo | Legacy devices (input switching, preamp settings) | 15555 |
 
 ## Requirements
 
@@ -830,6 +831,65 @@ Use the `nstream-*` commands for input control.
 
 ---
 
+---
+
+### UPnP Media Server Browsing
+
+The UPnP script can also discover and browse UPnP Media Servers on your network
+(such as NAS devices, Plex, MiniDLNA, etc.) and play content from them on your
+Naim device.
+
+| Command | Options | Description |
+|---------|---------|-------------|
+| `media-servers` | `[--timeout <seconds>]` | Discover UPnP Media Servers on the network |
+| `server-browse` | `--server <ip>` `[--object-id <id>]` `[--start <n>]` `[--count <n>]` | Browse a Media Server's content |
+| `server-search` | `--server <ip>` `--query <text>` | Search a Media Server for content |
+| `server-play` | `--server <ip>` `--object-id <id>` | Play a track from a Media Server on a Naim renderer |
+
+```bash
+# Discover Media Servers on your network
+./naim_control_upnp.py media-servers
+
+# Browse root of a Media Server
+./naim_control_upnp.py server-browse --server 192.168.1.100
+
+# Browse a specific folder (use ObjectID from previous browse)
+./naim_control_upnp.py server-browse --server 192.168.1.100 --object-id "64"
+
+# Browse with pagination
+./naim_control_upnp.py server-browse --server 192.168.1.100 --object-id "64" --start 30 --count 30
+
+# Search for content
+./naim_control_upnp.py server-search --server 192.168.1.100 --query "beethoven"
+
+# Play a track from Media Server on your Naim device
+./naim_control_upnp.py --host 192.168.1.21 server-play --server 192.168.1.100 --object-id "64$123"
+```
+
+**Workflow example - Play music from NAS:**
+```bash
+# 1. Find Media Servers
+./naim_control_upnp.py media-servers
+#    Found: 192.168.1.100 (Synology Media Server)
+
+# 2. Browse root to find Music folder
+./naim_control_upnp.py server-browse --server 192.168.1.100
+#    [D] [1] Music
+#    [D] [2] Photos
+#    [D] [3] Videos
+
+# 3. Browse Music folder
+./naim_control_upnp.py server-browse --server 192.168.1.100 --object-id "1"
+#    [D] [1$1] Jazz
+#    [D] [1$2] Classical
+#    [F] [1$100] Track.flac
+
+# 4. Play a track on your Naim device
+./naim_control_upnp.py --host 192.168.1.21 server-play --server 192.168.1.100 --object-id "1$100"
+```
+
+---
+
 ### Quick shell alias for legacy devices
 
 Add to `~/.bashrc` or `~/.zshrc`:
@@ -889,3 +949,297 @@ devices (REST API). Here's what's available on each platform:
 
 If you need advanced input settings on a legacy device, check if your device
 also supports the REST API on port 15081 — some transitional models support both.
+
+---
+
+# n-Stream Commands (`naim_control_nstream.py`)
+
+For legacy Naim devices (SuperUniti, NDS, NDX, UnitiQute, NAC-N 272, etc.) that
+require the n-Stream/BridgeCo protocol for input switching and device settings.
+
+**When to use this script:** Use `naim_control_nstream.py` when you need to:
+- Switch inputs on legacy devices
+- Control volume via the preamp
+- Manage input settings (enable/disable, rename)
+- Control Bluetooth settings
+- Get device information (product, version, MAC)
+
+## Global Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--host` | *(required)* | IP address of the Naim device |
+| `--port` | `15555` | n-Stream port (do not change) |
+| `--timeout` | `5` | Response timeout in seconds |
+
+---
+
+## Command Reference
+
+### Input Control
+
+| Command | Options | Description |
+|---------|---------|-------------|
+| `inputs` | — | List all available inputs on the device |
+| `set-input` | `--input <name>` | Switch to specified input |
+| `get-input` | — | Get current input |
+| `input-up` | — | Cycle to next input |
+| `input-down` | — | Cycle to previous input |
+
+```bash
+# List all inputs available on the device
+./naim_control_nstream.py --host 192.168.1.21 inputs
+
+# Switch to Digital Input 2
+./naim_control_nstream.py --host 192.168.1.21 set-input --input DIGITAL2
+
+# Switch to UPnP streaming
+./naim_control_nstream.py --host 192.168.1.21 set-input --input UPNP
+
+# Get current input
+./naim_control_nstream.py --host 192.168.1.21 get-input
+
+# Cycle through inputs
+./naim_control_nstream.py --host 192.168.1.21 input-up
+./naim_control_nstream.py --host 192.168.1.21 input-down
+```
+
+**Valid input names:**
+| Category | Inputs |
+|----------|--------|
+| Streaming | `UPNP`, `IRADIO`, `SPOTIFY`, `TIDAL`, `AIRPLAY`, `BLUETOOTH` |
+| Digital | `DIGITAL1` through `DIGITAL10` |
+| Analog | `ANALOGUE1` through `ANALOGUE5`, `PHONO` |
+| Other | `USB`, `CD`, `FM`, `DAB`, `FRONT`, `MULTIROOM`, `IPOD` |
+| HDMI | `HDMI1` through `HDMI5` |
+
+---
+
+### Input Management
+
+| Command | Options | Description |
+|---------|---------|-------------|
+| `input-enable` | `--input <name>` | Enable an input |
+| `input-disable` | `--input <name>` | Disable an input |
+| `input-enabled` | `--input <name>` | Check if input is enabled |
+| `input-rename` | `--input <name>` `--name "<display>"` | Set input display name |
+| `input-name` | `--input <name>` | Get input display name |
+
+```bash
+# Enable/disable inputs
+./naim_control_nstream.py --host 192.168.1.21 input-enable --input DIGITAL1
+./naim_control_nstream.py --host 192.168.1.21 input-disable --input DIGITAL1
+./naim_control_nstream.py --host 192.168.1.21 input-enabled --input DIGITAL1
+
+# Rename inputs (set custom display name)
+./naim_control_nstream.py --host 192.168.1.21 input-rename --input DIGITAL1 --name "TV Audio"
+./naim_control_nstream.py --host 192.168.1.21 input-name --input DIGITAL1
+```
+
+---
+
+### Volume and Preamp Control
+
+| Command | Options | Description |
+|---------|---------|-------------|
+| `vol-up` | — | Volume up |
+| `vol-down` | — | Volume down |
+| `vol-set` | `--level <0-100>` | Set volume level |
+| `mute` | — | Mute audio |
+| `unmute` | — | Unmute audio |
+| `preamp` | — | Get full preamp status (volume, mute, balance, input) |
+| `max-vol-get` | — | Get maximum amplifier volume limit |
+| `max-vol-set` | `--level <0-100>` | Set maximum amplifier volume limit |
+| `headphone-max-vol` | — | Get maximum headphone volume limit |
+| `balance-get` | — | Get balance setting |
+| `balance-set` | `--level <n>` | Set balance (negative=left, 0=center, positive=right) |
+
+```bash
+# Volume control
+./naim_control_nstream.py --host 192.168.1.21 vol-up
+./naim_control_nstream.py --host 192.168.1.21 vol-down
+./naim_control_nstream.py --host 192.168.1.21 vol-set --level 50
+./naim_control_nstream.py --host 192.168.1.21 mute
+./naim_control_nstream.py --host 192.168.1.21 unmute
+
+# Get preamp status (shows volume, mute, balance, current input)
+./naim_control_nstream.py --host 192.168.1.21 preamp
+
+# Volume limits
+./naim_control_nstream.py --host 192.168.1.21 max-vol-get
+./naim_control_nstream.py --host 192.168.1.21 max-vol-set --level 80
+./naim_control_nstream.py --host 192.168.1.21 headphone-max-vol
+
+# Balance
+./naim_control_nstream.py --host 192.168.1.21 balance-get
+./naim_control_nstream.py --host 192.168.1.21 balance-set --level 0
+```
+
+---
+
+### Playback Control
+
+| Command | Description |
+|---------|-------------|
+| `play` | Start playback |
+| `pause` | Toggle pause |
+| `stop` | Stop playback |
+| `next` | Skip to next track |
+| `prev` | Skip to previous track |
+
+```bash
+./naim_control_nstream.py --host 192.168.1.21 play
+./naim_control_nstream.py --host 192.168.1.21 pause
+./naim_control_nstream.py --host 192.168.1.21 stop
+./naim_control_nstream.py --host 192.168.1.21 next
+./naim_control_nstream.py --host 192.168.1.21 prev
+```
+
+---
+
+### Bluetooth Control
+
+| Command | Options | Description |
+|---------|---------|-------------|
+| `bt-status` | — | Get Bluetooth status |
+| `bt-pair` | — | Enter pairing mode |
+| `bt-pair-exit` | — | Exit pairing mode |
+| `bt-disconnect` | — | Disconnect current Bluetooth device |
+| `bt-forget` | — | Disconnect and forget current device |
+| `bt-name-get` | — | Get Bluetooth device name |
+| `bt-name-set` | `--name "<name>"` | Set Bluetooth device name |
+
+```bash
+./naim_control_nstream.py --host 192.168.1.21 bt-status
+./naim_control_nstream.py --host 192.168.1.21 bt-pair
+./naim_control_nstream.py --host 192.168.1.21 bt-pair-exit
+./naim_control_nstream.py --host 192.168.1.21 bt-disconnect
+./naim_control_nstream.py --host 192.168.1.21 bt-forget
+./naim_control_nstream.py --host 192.168.1.21 bt-name-get
+./naim_control_nstream.py --host 192.168.1.21 bt-name-set --name "Living Room Naim"
+```
+
+---
+
+### Display Wake-Up
+
+When you use the Naim app, the device display lights up to confirm your action.
+This is achieved via the SYNCDISP command. Use these commands to wake the display:
+
+| Command | Description |
+|---------|-------------|
+| `sync-display-on` | Enable display sync - wakes the display (like app interaction) |
+| `sync-display-off` | Disable display sync |
+
+```bash
+# Wake up the device display
+./naim_control_nstream.py --host 192.168.1.21 sync-display-on
+
+# Disable display sync
+./naim_control_nstream.py --host 192.168.1.21 sync-display-off
+```
+
+**Note:** For newer devices using REST API, the equivalent command is:
+```bash
+./naim_control_rest.py --host 192.168.1.50 system-keepawake
+```
+
+---
+
+### Device Settings
+
+| Command | Options | Description |
+|---------|---------|-------------|
+| `room-name-get` | — | Get room/device name |
+| `room-name-set` | `--name "<name>"` | Set room/device name |
+| `standby` | — | Put device into standby |
+| `wakeup` | — | Wake device from standby |
+
+```bash
+./naim_control_nstream.py --host 192.168.1.21 room-name-get
+./naim_control_nstream.py --host 192.168.1.21 room-name-set --name "Living Room"
+./naim_control_nstream.py --host 192.168.1.21 standby
+./naim_control_nstream.py --host 192.168.1.21 wakeup
+```
+
+---
+
+### Device Information
+
+| Command | Description |
+|---------|-------------|
+| `product` | Get product type (e.g., SUPER_UNITI) |
+| `version` | Get firmware version |
+| `mac` | Get MAC address |
+
+```bash
+./naim_control_nstream.py --host 192.168.1.21 product
+./naim_control_nstream.py --host 192.168.1.21 version
+./naim_control_nstream.py --host 192.168.1.21 mac
+```
+
+---
+
+### Quick shell alias for n-Stream
+
+Add to `~/.bashrc` or `~/.zshrc`:
+
+```bash
+alias naim-input='python3 /path/to/naim_control_nstream.py --host 192.168.1.21'
+```
+
+Then use:
+
+```bash
+naim-input inputs
+naim-input set-input --input DIGITAL2
+naim-input preamp
+naim-input max-vol-set --level 80
+```
+
+---
+
+## n-Stream Troubleshooting
+
+**Connection refused / timeout**
+- Port 15555 must be accessible on the device
+- Verify with: `nc -zv 192.168.1.21 15555`
+- Device must be powered on (not in deep standby)
+
+**"Unknown command" errors**
+- Some commands are not available on all device models
+- Check `product` output to verify your device type
+- Older firmware may not support newer NVM commands
+
+**Input not switching**
+- Verify input name is valid with `inputs` command
+- Input names are case-sensitive (use uppercase: `DIGITAL2`, not `digital2`)
+- Some inputs may be disabled; use `input-enable` first
+
+---
+
+## Which Script Should I Use?
+
+```
+Is your device a newer model (Uniti Atom/Star/Nova, Mu-so 2nd gen)?
+│
+├─ YES → Use naim_control_rest.py (port 15081)
+│        Full control of everything
+│
+└─ NO (Legacy device: SuperUniti, NDS, NDX, UnitiQute, etc.)
+   │
+   ├─ For playback control (play/pause/stop)?
+   │  └─ Use naim_control_upnp.py (port 8080)
+   │
+   ├─ For volume control?
+   │  └─ Use naim_control_upnp.py OR naim_control_nstream.py
+   │
+   ├─ For input switching?
+   │  └─ Use naim_control_nstream.py (port 15555)
+   │
+   ├─ For browsing UPnP Media Servers?
+   │  └─ Use naim_control_upnp.py (media-servers, server-browse)
+   │
+   └─ For device settings (max volume, room name, Bluetooth)?
+      └─ Use naim_control_nstream.py (port 15555)
+```

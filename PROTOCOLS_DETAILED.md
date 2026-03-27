@@ -1933,7 +1933,12 @@ Example response (multiple lines):
 |---------|-------------|----------|
 | `*NVM VOL+\r` | Volume up | `#NVM VOL+ <level>` |
 | `*NVM VOL-\r` | Volume down | `#NVM VOL- <level>` |
+| `*NVM SETRVOL <level>\r` | Set volume (0-100) | `#NVM SETRVOL OK` |
+| `*NVM SETMUTE ON\|OFF\r` | Set mute state | `#NVM SETMUTE OK` |
 | `*NVM GETPREAMP\r` | Get preamp status | `#NVM PREAMP <vol> <mute> <balance> <input> ... "<inputname>" ...` |
+| `*NVM GETAMPMAXVOL\r` | Get max amplifier volume limit | `#NVM GETAMPMAXVOL <level>` |
+| `*NVM SETAMPMAXVOL <level>\r` | Set max amplifier volume (0-100) | `#NVM SETAMPMAXVOL OK` |
+| `*NVM GETHEADMAXVOL\r` | Get max headphone volume limit | `#NVM GETHEADMAXVOL <level>` |
 | `*NVM GETBAL\r` | Get balance | `#NVM GETBAL <level>` |
 | `*NVM SETBAL <level>\r` | Set balance | `#NVM SETBAL OK` |
 
@@ -1963,6 +1968,69 @@ The `GETPREAMP` command returns detailed preamp status:
 | `*NVM GETSEDMPCAPS\r` | Get DMP capabilities | `#NVM GETSEDMPCAPS <caps>` |
 | `*NVM GETMAC\r` | Get MAC address | `#NVM GETMAC <b1> <b2> <b3> <b4> <b5> <b6>` (6 hex bytes) |
 | `*NVM GETLANG\r` | Get language setting | `#NVM GETLANG <code>` |
+| `*NVM GETROOMNAME\r` | Get room/device name | `#NVM GETROOMNAME "<name>"` |
+| `*NVM SETROOMNAME "<name>"\r` | Set room/device name | `#NVM SETROOMNAME OK` |
+| `*NVM GETSERIALNUM\r` | Get serial number (newer models) | `#NVM GETSERIALNUM <serial>` |
+| `*NVM GETBSLVER\r` | Get BSL version | `#NVM GETBSLVER <version>` |
+
+### Playback Commands
+
+| Command | Description | Response |
+|---------|-------------|----------|
+| `*NVM PLAY\r` | Start playback | `#NVM PLAY OK` |
+| `*NVM STOP\r` | Stop playback | `#NVM STOP OK` |
+| `*NVM PAUSE ON\|OFF\r` | Set pause state | `#NVM PAUSE OK` |
+| `*NVM PAUSE TOGGLE\r` | Toggle pause | `#NVM PAUSE OK` |
+| `*NVM NEXTTRACK\r` | Skip to next track | `#NVM NEXTTRACK OK` |
+| `*NVM PREVTRACK\r` | Skip to previous track | `#NVM PREVTRACK OK` |
+| `*NVM FF ON\r` | Fast forward on | `#NVM FF OK` |
+| `*NVM FF OFF\r` | Fast forward off | `#NVM FF OK` |
+| `*NVM FR ON\r` | Fast rewind on | `#NVM FR OK` |
+| `*NVM FR OFF\r` | Fast rewind off | `#NVM FR OK` |
+| `*NVM REPEAT ON\|OFF\r` | Set repeat mode | `#NVM REPEAT OK` |
+| `*NVM RANDOM ON\|OFF\r` | Set shuffle/random mode | `#NVM RANDOM OK` |
+
+### Standby/Power Commands
+
+| Command | Description | Response |
+|---------|-------------|----------|
+| `*NVM SETSTANDBY ON\r` | Put device into standby | `#NVM SETSTANDBY OK` |
+| `*NVM SETSTANDBY OFF\r` | Wake device from standby | `#NVM SETSTANDBY OK` |
+| `*NVM GETSTANDBYSTATUS\r` | Get standby status | `#NVM GETSTANDBYSTATUS ON\|OFF` |
+
+### Bluetooth Commands
+
+| Command | Description | Response |
+|---------|-------------|----------|
+| `*NVM BTSTATUS\r` | Get Bluetooth status | `#NVM BTSTATUS <status fields>` |
+| `*NVM BTPAIR\r` | Start pairing mode | `#NVM BTPAIR OK` |
+| `*NVM BTPAIR EXIT\r` | Exit pairing mode | `#NVM BTPAIR OK` |
+| `*NVM BTDROPLINK\r` | Disconnect current device | `#NVM BTDROPLINK OK` |
+| `*NVM BTDROPLINK FORGET\r` | Forget current device | `#NVM BTDROPLINK OK` |
+| `*NVM BTRECONNECT\r` | Reconnect to last device | `#NVM BTRECONNECT OK` |
+| `*NVM BTRESET\r` | Reset Bluetooth | `#NVM BTRESET OK` |
+| `*NVM GETBTNAME\r` | Get BT device name | `#NVM GETBTNAME "<name>"` |
+| `*NVM SETBTNAME "<name>"\r` | Set BT device name | `#NVM SETBTNAME OK` |
+| `*NVM GETBTSECURITY\r` | Get BT security mode | `#NVM GETBTSECURITY OPEN\|CLOSED` |
+| `*NVM SETBTSECURITY OPEN\|CLOSED\r` | Set BT security mode | `#NVM SETBTSECURITY OK` |
+| `*NVM GETBTAUTORECONNECT\r` | Get auto-reconnect setting | `#NVM GETBTAUTORECONNECT ON\|OFF` |
+| `*NVM SETBTAUTORECONNECT ON\|OFF\r` | Set auto-reconnect | `#NVM SETBTAUTORECONNECT OK` |
+| `*NVM GETBTAUTOPLAY\r` | Get auto-play setting | `#NVM GETBTAUTOPLAY ON\|OFF` |
+| `*NVM SETBTAUTOPLAY ON\|OFF\r` | Set auto-play | `#NVM SETBTAUTOPLAY OK` |
+
+### Preset Commands
+
+| Command | Description | Response |
+|---------|-------------|----------|
+| `*NVM GETTOTALPRESETS\r` | Get total preset count | `#NVM GETTOTALPRESETS <count>` |
+| `*NVM GETPRESET <n>\r` | Get preset details | `#NVM GETPRESET <n> <uri> "<name>"` |
+| `*NVM SETPRESET <n> <uri>\r` | Set preset content | `#NVM SETPRESET OK` |
+| `*NVM GETPRESETBLK <start> <count>\r` | Bulk query presets | Multiple responses |
+| `*NVM RENAMEPRESET <n> "<name>"\r` | Rename preset | `#NVM RENAMEPRESET OK` |
+| `*NVM CLEARPRESET <n>\r` | Clear preset | `#NVM CLEARPRESET OK` |
+| `*NVM GOTOPRESET <n>\r` | Play preset | `#NVM GOTOPRESET OK` |
+| `*NVM PRESET+\r` | Next preset | `#NVM PRESET+ <n>` |
+| `*NVM PRESET-\r` | Previous preset | `#NVM PRESET- <n>` |
 
 ### System Commands
 
@@ -2019,11 +2087,31 @@ Used during app startup to get multiple values at once:
 
 | Code | Meaning |
 |------|---------|
+| `4` | Unknown command (not supported on this device/firmware) |
 | `401` | Invalid argument |
 | `402` | Command not supported |
 | `403` | Input not available |
 | `404` | Resource not found |
 | `500` | Internal error |
+
+### Command Availability by Device
+
+Not all commands are available on all devices. Availability depends on device model and firmware version.
+
+**Commands tested on SuperUniti (firmware 2.0.11.14171):**
+
+| Command | Status |
+|---------|--------|
+| `GETAMPMAXVOL` / `SETAMPMAXVOL` | Working |
+| `GETHEADMAXVOL` | Working |
+| `SETRVOL` / `SETMUTE` | Working |
+| `GETBAL` / `SETBAL` | Working |
+| `GETROOMNAME` / `SETROOMNAME` | Working |
+| `BTSTATUS` / `BTPAIR` / `BTDROPLINK` | Working |
+| `GETBTNAME` / `SETBTNAME` | Working |
+| `GETILLUM` / `SETILLUM` | Error 4 (Not available) |
+| `GETAUTOSTANDBYPERIOD` / `SETAUTOSTANDBYPERIOD` | Error 4 (Not available) |
+| `GETSERIALNUM` | Error 4 (Not available) |
 
 ---
 

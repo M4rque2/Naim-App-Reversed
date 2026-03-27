@@ -1100,6 +1100,650 @@ def cmd_volume_down(args):
         sys.exit(1)
 
 
+def cmd_volume_set(args):
+    """Set volume to a specific level via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    level = args.level
+
+    if level < 0 or level > 100:
+        print("Error: Volume level must be between 0 and 100")
+        sys.exit(1)
+
+    print(f"Setting volume to {level} via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, f"*NVM SETRVOL {level}", NSTREAM_PORT, verbose=verbose)
+        print(f"Volume set to {level}")
+        if verbose:
+            for line in responses:
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to set volume: {e}")
+        sys.exit(1)
+
+
+def cmd_mute(args):
+    """Mute audio via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Muting audio via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM SETMUTE ON", NSTREAM_PORT, verbose=verbose)
+        print("Audio muted")
+        if verbose:
+            for line in responses:
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to mute: {e}")
+        sys.exit(1)
+
+
+def cmd_unmute(args):
+    """Unmute audio via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Unmuting audio via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM SETMUTE OFF", NSTREAM_PORT, verbose=verbose)
+        print("Audio unmuted")
+        if verbose:
+            for line in responses:
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to unmute: {e}")
+        sys.exit(1)
+
+
+def cmd_max_volume_get(args):
+    """Get maximum amplifier volume limit via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Getting max volume limit via n-Stream protocol...")
+    print()
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM GETAMPMAXVOL", NSTREAM_PORT, verbose=verbose)
+        for line in responses:
+            cmd, values = _parse_nvm_response(line)
+            if cmd == 'GETAMPMAXVOL' and values:
+                print(f"Max Amplifier Volume: {values[0]}")
+            elif cmd not in ('SETUNSOLICITED', 'ALARMSTATE'):
+                print(f"  {line}")
+        if not responses:
+            print("No response received (timeout)")
+    except NStreamError as e:
+        print(f"Failed to get max volume: {e}")
+        sys.exit(1)
+
+
+def cmd_max_volume_set(args):
+    """Set maximum amplifier volume limit via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    level = args.level
+
+    if level < 0 or level > 100:
+        print("Error: Max volume level must be between 0 and 100")
+        sys.exit(1)
+
+    print(f"Setting max volume limit to {level} via n-Stream protocol...")
+    print()
+
+    try:
+        responses = nstream_send_and_receive(args.host, f"*NVM SETAMPMAXVOL {level}", NSTREAM_PORT, verbose=verbose)
+        for line in responses:
+            cmd, values = _parse_nvm_response(line)
+            if cmd == 'SETAMPMAXVOL' and values and values[0] == 'OK':
+                print(f"Max volume limit set to {level}")
+            elif cmd not in ('SETUNSOLICITED', 'ALARMSTATE'):
+                print(f"  {line}")
+        if not responses:
+            print("No response received (timeout)")
+    except NStreamError as e:
+        print(f"Failed to set max volume: {e}")
+        sys.exit(1)
+
+
+def cmd_headphone_max_volume_get(args):
+    """Get maximum headphone volume limit via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Getting max headphone volume limit via n-Stream protocol...")
+    print()
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM GETHEADMAXVOL", NSTREAM_PORT, verbose=verbose)
+        for line in responses:
+            cmd, values = _parse_nvm_response(line)
+            if cmd == 'GETHEADMAXVOL' and values:
+                print(f"Max Headphone Volume: {values[0]}")
+            elif cmd not in ('SETUNSOLICITED', 'ALARMSTATE'):
+                print(f"  {line}")
+        if not responses:
+            print("No response received (timeout)")
+    except NStreamError as e:
+        print(f"Failed to get max headphone volume: {e}")
+        sys.exit(1)
+
+
+def cmd_balance_get(args):
+    """Get audio balance via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Getting balance via n-Stream protocol...")
+    print()
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM GETBAL", NSTREAM_PORT, verbose=verbose)
+        for line in responses:
+            cmd, values = _parse_nvm_response(line)
+            if cmd == 'GETBAL' and values:
+                balance = int(values[0])
+                if balance == 0:
+                    print(f"Balance: Center (0)")
+                elif balance < 0:
+                    print(f"Balance: Left ({balance})")
+                else:
+                    print(f"Balance: Right (+{balance})")
+            elif cmd not in ('SETUNSOLICITED', 'ALARMSTATE'):
+                print(f"  {line}")
+        if not responses:
+            print("No response received (timeout)")
+    except NStreamError as e:
+        print(f"Failed to get balance: {e}")
+        sys.exit(1)
+
+
+def cmd_balance_set(args):
+    """Set audio balance via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    balance = args.level
+
+    print(f"Setting balance to {balance} via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, f"*NVM SETBAL {balance}", NSTREAM_PORT, verbose=verbose)
+        for line in responses:
+            cmd, values = _parse_nvm_response(line)
+            if cmd == 'SETBAL' and values and values[0] == 'OK':
+                print(f"Balance set to {balance}")
+            elif cmd not in ('SETUNSOLICITED', 'ALARMSTATE'):
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to set balance: {e}")
+        sys.exit(1)
+
+
+def cmd_display_get(args):
+    """Get display illumination level via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Getting display illumination via n-Stream protocol...")
+    print()
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM GETILLUM", NSTREAM_PORT, verbose=verbose)
+        for line in responses:
+            cmd, values = _parse_nvm_response(line)
+            if cmd == 'GETILLUM' and values:
+                print(f"Display Illumination: {values[0]}")
+            elif cmd not in ('SETUNSOLICITED', 'ALARMSTATE'):
+                print(f"  {line}")
+        if not responses:
+            print("No response received (timeout)")
+    except NStreamError as e:
+        print(f"Failed to get illumination: {e}")
+        sys.exit(1)
+
+
+def cmd_display_set(args):
+    """Set display illumination level via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    level = args.level
+
+    print(f"Setting display illumination to {level} via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, f"*NVM SETILLUM {level}", NSTREAM_PORT, verbose=verbose)
+        for line in responses:
+            cmd, values = _parse_nvm_response(line)
+            if cmd == 'SETILLUM' and values and values[0] == 'OK':
+                print(f"Display illumination set to {level}")
+            elif cmd not in ('SETUNSOLICITED', 'ALARMSTATE'):
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to set illumination: {e}")
+        sys.exit(1)
+
+
+def cmd_sync_display_on(args):
+    """Enable display synchronization - wakes up the display.
+
+    This command syncs the display state with app activity, causing the
+    device's screen to wake up and show feedback when commands are sent.
+    This is the same mechanism the Naim app uses to wake the display.
+    """
+    verbose = getattr(args, 'verbose', False)
+    print(f"Enabling display sync (waking display) via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM SYNCDISP ON", NSTREAM_PORT, verbose=verbose)
+        print("Display sync enabled - display should wake up")
+        if verbose:
+            for line in responses:
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to enable display sync: {e}")
+        sys.exit(1)
+
+
+def cmd_sync_display_off(args):
+    """Disable display synchronization."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Disabling display sync via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM SYNCDISP OFF", NSTREAM_PORT, verbose=verbose)
+        print("Display sync disabled")
+        if verbose:
+            for line in responses:
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to disable display sync: {e}")
+        sys.exit(1)
+
+
+def cmd_standby(args):
+    """Put device into standby via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Putting device into standby via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM SETSTANDBY ON", NSTREAM_PORT, verbose=verbose)
+        print("Standby command sent")
+        if verbose:
+            for line in responses:
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to set standby: {e}")
+        sys.exit(1)
+
+
+def cmd_wakeup(args):
+    """Wake device from standby via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Waking device from standby via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM SETSTANDBY OFF", NSTREAM_PORT, verbose=verbose)
+        print("Wakeup command sent")
+        if verbose:
+            for line in responses:
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to wake device: {e}")
+        sys.exit(1)
+
+
+def cmd_standby_status(args):
+    """Get standby status via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Getting standby status via n-Stream protocol...")
+    print()
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM GETSTANDBYSTATUS", NSTREAM_PORT, verbose=verbose)
+        for line in responses:
+            cmd, values = _parse_nvm_response(line)
+            if cmd == 'GETSTANDBYSTATUS' and values:
+                status = "In standby" if values[0] == 'ON' else "Active"
+                print(f"Standby Status: {status}")
+            elif cmd not in ('SETUNSOLICITED', 'ALARMSTATE'):
+                print(f"  {line}")
+        if not responses:
+            print("No response received (timeout)")
+    except NStreamError as e:
+        print(f"Failed to get standby status: {e}")
+        sys.exit(1)
+
+
+def cmd_auto_standby_get(args):
+    """Get auto-standby timeout via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Getting auto-standby timeout via n-Stream protocol...")
+    print()
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM GETAUTOSTANDBYPERIOD", NSTREAM_PORT, verbose=verbose)
+        for line in responses:
+            cmd, values = _parse_nvm_response(line)
+            if cmd == 'GETAUTOSTANDBYPERIOD' and values:
+                mins = int(values[0])
+                if mins == 0:
+                    print(f"Auto-standby: Disabled")
+                else:
+                    print(f"Auto-standby: {mins} minutes")
+            elif cmd not in ('SETUNSOLICITED', 'ALARMSTATE'):
+                print(f"  {line}")
+        if not responses:
+            print("No response received (timeout)")
+    except NStreamError as e:
+        print(f"Failed to get auto-standby: {e}")
+        sys.exit(1)
+
+
+def cmd_auto_standby_set(args):
+    """Set auto-standby timeout via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    mins = args.minutes
+
+    print(f"Setting auto-standby to {mins} minutes via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, f"*NVM SETAUTOSTANDBYPERIOD {mins}", NSTREAM_PORT, verbose=verbose)
+        for line in responses:
+            cmd, values = _parse_nvm_response(line)
+            if cmd == 'SETAUTOSTANDBYPERIOD' and values and values[0] == 'OK':
+                if mins == 0:
+                    print("Auto-standby disabled")
+                else:
+                    print(f"Auto-standby set to {mins} minutes")
+            elif cmd not in ('SETUNSOLICITED', 'ALARMSTATE'):
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to set auto-standby: {e}")
+        sys.exit(1)
+
+
+def cmd_room_name_get(args):
+    """Get room/device name via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Getting room name via n-Stream protocol...")
+    print()
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM GETROOMNAME", NSTREAM_PORT, verbose=verbose)
+        for line in responses:
+            cmd, values = _parse_nvm_response(line)
+            if cmd == 'GETROOMNAME' and values:
+                print(f"Room Name: {values[0]}")
+            elif cmd not in ('SETUNSOLICITED', 'ALARMSTATE'):
+                print(f"  {line}")
+        if not responses:
+            print("No response received (timeout)")
+    except NStreamError as e:
+        print(f"Failed to get room name: {e}")
+        sys.exit(1)
+
+
+def cmd_room_name_set(args):
+    """Set room/device name via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    name = args.name
+
+    print(f"Setting room name to '{name}' via n-Stream protocol...")
+
+    try:
+        escaped_name = name.replace('"', '\\"')
+        responses = nstream_send_and_receive(args.host, f'*NVM SETROOMNAME "{escaped_name}"', NSTREAM_PORT, verbose=verbose)
+        for line in responses:
+            cmd, values = _parse_nvm_response(line)
+            if cmd == 'SETROOMNAME' and values and values[0] == 'OK':
+                print(f"Room name set to '{name}'")
+            elif cmd not in ('SETUNSOLICITED', 'ALARMSTATE'):
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to set room name: {e}")
+        sys.exit(1)
+
+
+def cmd_serial(args):
+    """Get device serial number via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Getting serial number via n-Stream protocol...")
+    print()
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM GETSERIALNUM", NSTREAM_PORT, verbose=verbose)
+        for line in responses:
+            cmd, values = _parse_nvm_response(line)
+            if cmd == 'GETSERIALNUM' and values:
+                print(f"Serial Number: {values[0]}")
+            elif cmd not in ('SETUNSOLICITED', 'ALARMSTATE'):
+                print(f"  {line}")
+        if not responses:
+            print("No response received (timeout)")
+    except NStreamError as e:
+        print(f"Failed to get serial: {e}")
+        sys.exit(1)
+
+
+# ─────────────────────────────────────────────
+# PLAYBACK COMMANDS
+# ─────────────────────────────────────────────
+
+def cmd_play(args):
+    """Start playback via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Starting playback via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM PLAY", NSTREAM_PORT, verbose=verbose)
+        print("Play command sent")
+        if verbose:
+            for line in responses:
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to play: {e}")
+        sys.exit(1)
+
+
+def cmd_stop(args):
+    """Stop playback via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Stopping playback via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM STOP", NSTREAM_PORT, verbose=verbose)
+        print("Stop command sent")
+        if verbose:
+            for line in responses:
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to stop: {e}")
+        sys.exit(1)
+
+
+def cmd_pause(args):
+    """Toggle pause via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Toggling pause via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM PAUSE TOGGLE", NSTREAM_PORT, verbose=verbose)
+        print("Pause toggle command sent")
+        if verbose:
+            for line in responses:
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to pause: {e}")
+        sys.exit(1)
+
+
+def cmd_next_track(args):
+    """Skip to next track via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Skipping to next track via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM NEXTTRACK", NSTREAM_PORT, verbose=verbose)
+        print("Next track command sent")
+        if verbose:
+            for line in responses:
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to skip: {e}")
+        sys.exit(1)
+
+
+def cmd_prev_track(args):
+    """Skip to previous track via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Skipping to previous track via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM PREVTRACK", NSTREAM_PORT, verbose=verbose)
+        print("Previous track command sent")
+        if verbose:
+            for line in responses:
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to skip: {e}")
+        sys.exit(1)
+
+
+# ─────────────────────────────────────────────
+# BLUETOOTH COMMANDS
+# ─────────────────────────────────────────────
+
+def cmd_bt_status(args):
+    """Get Bluetooth status via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Getting Bluetooth status via n-Stream protocol...")
+    print()
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM BTSTATUS", NSTREAM_PORT, verbose=verbose)
+        for line in responses:
+            cmd, values = _parse_nvm_response(line)
+            if cmd == 'BTSTATUS' and values:
+                print(f"Bluetooth Status: {' '.join(values)}")
+            elif cmd not in ('SETUNSOLICITED', 'ALARMSTATE'):
+                print(f"  {line}")
+        if not responses:
+            print("No response received (timeout)")
+    except NStreamError as e:
+        print(f"Failed to get BT status: {e}")
+        sys.exit(1)
+
+
+def cmd_bt_pair(args):
+    """Start Bluetooth pairing mode via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Starting Bluetooth pairing mode via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM BTPAIR", NSTREAM_PORT, verbose=verbose)
+        print("Bluetooth pairing mode activated")
+        if verbose:
+            for line in responses:
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to start pairing: {e}")
+        sys.exit(1)
+
+
+def cmd_bt_pair_exit(args):
+    """Exit Bluetooth pairing mode via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Exiting Bluetooth pairing mode via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM BTPAIR EXIT", NSTREAM_PORT, verbose=verbose)
+        print("Bluetooth pairing mode exited")
+        if verbose:
+            for line in responses:
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to exit pairing: {e}")
+        sys.exit(1)
+
+
+def cmd_bt_disconnect(args):
+    """Disconnect current Bluetooth device via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Disconnecting Bluetooth device via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM BTDROPLINK", NSTREAM_PORT, verbose=verbose)
+        print("Bluetooth device disconnected")
+        if verbose:
+            for line in responses:
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to disconnect: {e}")
+        sys.exit(1)
+
+
+def cmd_bt_forget(args):
+    """Forget current Bluetooth device via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Forgetting Bluetooth device via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM BTDROPLINK FORGET", NSTREAM_PORT, verbose=verbose)
+        print("Bluetooth device forgotten")
+        if verbose:
+            for line in responses:
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to forget device: {e}")
+        sys.exit(1)
+
+
+def cmd_bt_reconnect(args):
+    """Reconnect to last Bluetooth device via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Reconnecting to Bluetooth device via n-Stream protocol...")
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM BTRECONNECT", NSTREAM_PORT, verbose=verbose)
+        print("Bluetooth reconnect command sent")
+        if verbose:
+            for line in responses:
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to reconnect: {e}")
+        sys.exit(1)
+
+
+def cmd_bt_name_get(args):
+    """Get Bluetooth device name via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    print(f"Getting Bluetooth name via n-Stream protocol...")
+    print()
+
+    try:
+        responses = nstream_send_and_receive(args.host, "*NVM GETBTNAME", NSTREAM_PORT, verbose=verbose)
+        for line in responses:
+            cmd, values = _parse_nvm_response(line)
+            if cmd == 'GETBTNAME' and values:
+                print(f"Bluetooth Name: {values[0]}")
+            elif cmd not in ('SETUNSOLICITED', 'ALARMSTATE'):
+                print(f"  {line}")
+        if not responses:
+            print("No response received (timeout)")
+    except NStreamError as e:
+        print(f"Failed to get BT name: {e}")
+        sys.exit(1)
+
+
+def cmd_bt_name_set(args):
+    """Set Bluetooth device name via n-Stream protocol."""
+    verbose = getattr(args, 'verbose', False)
+    name = args.name
+
+    print(f"Setting Bluetooth name to '{name}' via n-Stream protocol...")
+
+    try:
+        escaped_name = name.replace('"', '\\"')
+        responses = nstream_send_and_receive(args.host, f'*NVM SETBTNAME "{escaped_name}"', NSTREAM_PORT, verbose=verbose)
+        for line in responses:
+            cmd, values = _parse_nvm_response(line)
+            if cmd == 'SETBTNAME' and values and values[0] == 'OK':
+                print(f"Bluetooth name set to '{name}'")
+            elif cmd not in ('SETUNSOLICITED', 'ALARMSTATE'):
+                print(f"  {line}")
+    except NStreamError as e:
+        print(f"Failed to set BT name: {e}")
+        sys.exit(1)
+
+
 # ─────────────────────────────────────────────
 # CLI SETUP
 # ─────────────────────────────────────────────
@@ -1118,32 +1762,49 @@ def main():
 This tool controls legacy Naim devices (SuperUniti, NDS, NDX, UnitiQute, etc.)
 via the proprietary n-Stream/BridgeCo protocol on TCP port 15555.
 
-Primary use case: Input/source switching (not available via UPnP)
-
-Examples:
-  %(prog)s inputs                                    # List valid input names
+INPUT CONTROL:
+  %(prog)s --host 192.168.1.21 inputs                    # List device inputs
   %(prog)s --host 192.168.1.21 set-input --input DIGITAL2
-  %(prog)s --host 192.168.1.21 set-input --input UPNP
-  %(prog)s --host 192.168.1.21 set-input --input digital2 -v
   %(prog)s --host 192.168.1.21 get-input
-  %(prog)s --host 192.168.1.21 input-up
-  %(prog)s --host 192.168.1.21 input-down
+  %(prog)s --host 192.168.1.21 input-up / input-down
+  %(prog)s --host 192.168.1.21 input-enable --input DIGITAL1
+  %(prog)s --host 192.168.1.21 input-disable --input DIGITAL1
+  %(prog)s --host 192.168.1.21 input-rename --input DIGITAL1 --name "TV Audio"
 
-Device Information:
-  %(prog)s --host 192.168.1.21 product
-  %(prog)s --host 192.168.1.21 version
-  %(prog)s --host 192.168.1.21 mac
-  %(prog)s --host 192.168.1.21 preamp
+VOLUME CONTROL:
+  %(prog)s --host 192.168.1.21 vol-up / vol-down
+  %(prog)s --host 192.168.1.21 vol-set --level 50
+  %(prog)s --host 192.168.1.21 mute / unmute
+  %(prog)s --host 192.168.1.21 max-vol-get              # Get max volume limit
+  %(prog)s --host 192.168.1.21 max-vol-set --level 80   # Set max volume limit
+  %(prog)s --host 192.168.1.21 balance-get / balance-set --level 0
 
-Volume Control (via NVM):
-  %(prog)s --host 192.168.1.21 vol-up
-  %(prog)s --host 192.168.1.21 vol-down
+PLAYBACK CONTROL:
+  %(prog)s --host 192.168.1.21 play / pause / stop
+  %(prog)s --host 192.168.1.21 next / prev
 
-Raw Commands:
+DISPLAY WAKE-UP:
+  %(prog)s --host 192.168.1.21 sync-display-on        # Wake display (like app interaction)
+  %(prog)s --host 192.168.1.21 sync-display-off       # Disable display sync
+
+DEVICE SETTINGS:
+  %(prog)s --host 192.168.1.21 display-get / display-set --level 3
+  %(prog)s --host 192.168.1.21 room-name-get / room-name-set --name "Living Room"
+  %(prog)s --host 192.168.1.21 auto-standby-get / auto-standby-set --minutes 20
+  %(prog)s --host 192.168.1.21 standby / wakeup / standby-status
+
+BLUETOOTH:
+  %(prog)s --host 192.168.1.21 bt-status
+  %(prog)s --host 192.168.1.21 bt-pair / bt-pair-exit
+  %(prog)s --host 192.168.1.21 bt-disconnect / bt-forget / bt-reconnect
+  %(prog)s --host 192.168.1.21 bt-name-get / bt-name-set --name "My Naim"
+
+DEVICE INFO:
+  %(prog)s --host 192.168.1.21 product / version / mac / serial / preamp
+
+RAW COMMANDS:
   %(prog)s --host 192.168.1.21 raw --command "*NVM PRODUCT"
-  %(prog)s --host 192.168.1.21 raw --command "*NVM VERSION"
 
-For playback control (play/pause/stop), use naim_control_upnp.py instead.
 For newer devices (Uniti series), use naim_control_rest.py instead.
         """,
     )
@@ -1247,6 +1908,189 @@ For newer devices (Uniti series), use naim_control_rest.py instead.
     p.add_argument("--verbose", "-v", action="store_true",
                    help="Show detailed debug output")
     p.set_defaults(func=cmd_volume_down)
+
+    p = sub.add_parser("vol-set", help="Set volume to specific level (0-100)")
+    p.add_argument("--level", "-l", type=int, required=True,
+                   help="Volume level (0-100)")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_volume_set)
+
+    p = sub.add_parser("mute", help="Mute audio")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_mute)
+
+    p = sub.add_parser("unmute", help="Unmute audio")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_unmute)
+
+    p = sub.add_parser("max-vol-get", help="Get maximum amplifier volume limit")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_max_volume_get)
+
+    p = sub.add_parser("max-vol-set", help="Set maximum amplifier volume limit (0-100)")
+    p.add_argument("--level", "-l", type=int, required=True,
+                   help="Max volume level (0-100)")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_max_volume_set)
+
+    p = sub.add_parser("headphone-max-vol", help="Get maximum headphone volume limit")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_headphone_max_volume_get)
+
+    p = sub.add_parser("balance-get", help="Get audio balance")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_balance_get)
+
+    p = sub.add_parser("balance-set", help="Set audio balance (negative=left, 0=center, positive=right)")
+    p.add_argument("--level", "-l", type=int, required=True,
+                   help="Balance level")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_balance_set)
+
+    # ── DISPLAY/SETTINGS COMMANDS ──
+    p = sub.add_parser("display-get", help="Get display illumination level")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_display_get)
+
+    p = sub.add_parser("display-set", help="Set display illumination level")
+    p.add_argument("--level", "-l", type=int, required=True,
+                   help="Illumination level")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_display_set)
+
+    p = sub.add_parser("sync-display-on", help="Enable display sync - wakes up display (like app interaction)")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_sync_display_on)
+
+    p = sub.add_parser("sync-display-off", help="Disable display sync")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_sync_display_off)
+
+    p = sub.add_parser("room-name-get", help="Get room/device name")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_room_name_get)
+
+    p = sub.add_parser("room-name-set", help="Set room/device name")
+    p.add_argument("--name", "-n", required=True,
+                   help="New room name")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_room_name_set)
+
+    p = sub.add_parser("serial", help="Get device serial number")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_serial)
+
+    # ── STANDBY/POWER COMMANDS ──
+    p = sub.add_parser("standby", help="Put device into standby")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_standby)
+
+    p = sub.add_parser("wakeup", help="Wake device from standby")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_wakeup)
+
+    p = sub.add_parser("standby-status", help="Get standby status")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_standby_status)
+
+    p = sub.add_parser("auto-standby-get", help="Get auto-standby timeout")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_auto_standby_get)
+
+    p = sub.add_parser("auto-standby-set", help="Set auto-standby timeout (0 to disable)")
+    p.add_argument("--minutes", "-m", type=int, required=True,
+                   help="Timeout in minutes (0 to disable)")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_auto_standby_set)
+
+    # ── PLAYBACK COMMANDS ──
+    p = sub.add_parser("play", help="Start playback")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_play)
+
+    p = sub.add_parser("stop", help="Stop playback")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_stop)
+
+    p = sub.add_parser("pause", help="Toggle pause")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_pause)
+
+    p = sub.add_parser("next", help="Skip to next track")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_next_track)
+
+    p = sub.add_parser("prev", help="Skip to previous track")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_prev_track)
+
+    # ── BLUETOOTH COMMANDS ──
+    p = sub.add_parser("bt-status", help="Get Bluetooth status")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_bt_status)
+
+    p = sub.add_parser("bt-pair", help="Start Bluetooth pairing mode")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_bt_pair)
+
+    p = sub.add_parser("bt-pair-exit", help="Exit Bluetooth pairing mode")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_bt_pair_exit)
+
+    p = sub.add_parser("bt-disconnect", help="Disconnect current Bluetooth device")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_bt_disconnect)
+
+    p = sub.add_parser("bt-forget", help="Forget current Bluetooth device")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_bt_forget)
+
+    p = sub.add_parser("bt-reconnect", help="Reconnect to last Bluetooth device")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_bt_reconnect)
+
+    p = sub.add_parser("bt-name-get", help="Get Bluetooth device name")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_bt_name_get)
+
+    p = sub.add_parser("bt-name-set", help="Set Bluetooth device name")
+    p.add_argument("--name", "-n", required=True,
+                   help="New Bluetooth name")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Show detailed debug output")
+    p.set_defaults(func=cmd_bt_name_set)
 
     # ── RAW COMMAND ──
     p = sub.add_parser("raw", help="Send a raw NVM command")
