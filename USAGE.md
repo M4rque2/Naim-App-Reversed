@@ -732,6 +732,104 @@ Output is displayed as key-value pairs. Errors go to stderr.
 
 ---
 
+### Input/Source Discovery and Selection
+
+Legacy Naim devices expose available inputs via the UPnP ContentDirectory service.
+Use these commands to discover and select inputs.
+
+| Command | Options | Description |
+|---------|---------|-------------|
+| `services` | `[-v\|--verbose]` | List all UPnP services and their available actions |
+| `inputs-list` | `[-r\|--recursive]` | List available inputs via ContentDirectory |
+| `input-browse` | `--object-id <id>` | Browse a specific container by ObjectID |
+| `current-input` | — | Show the current input/source being played |
+| `input-select` | `[--uri <url>] [--object-id <id>] [--play]` | Select an input |
+| `protocol-info` | — | Show supported media protocols (ConnectionManager) |
+| `input-settings` | — | Show input-related settings (if supported) |
+
+```bash
+# List all UPnP services available on the device
+./naim_control_upnp.py --host 192.168.1.21 services
+
+# List services with detailed action information
+./naim_control_upnp.py --host 192.168.1.21 services -v
+
+# List available inputs (root level)
+./naim_control_upnp.py --host 192.168.1.21 inputs-list
+
+# List inputs with children (recursive)
+./naim_control_upnp.py --host 192.168.1.21 inputs-list -r
+
+# Browse a specific container (e.g., inputs container)
+./naim_control_upnp.py --host 192.168.1.21 input-browse --object-id "0/0"
+
+# Show current input/source
+./naim_control_upnp.py --host 192.168.1.21 current-input
+
+# Select an input by URI and start playback
+./naim_control_upnp.py --host 192.168.1.21 input-select --uri "x-naim-input:digital1" --play
+
+# Select an input by ObjectID
+./naim_control_upnp.py --host 192.168.1.21 input-select --object-id "0/0/1" --play
+
+# Show supported media protocols
+./naim_control_upnp.py --host 192.168.1.21 protocol-info
+```
+
+**Note:** Input-specific settings like trim, alias, and enable/disable are only
+available on newer Naim devices via the REST API. Legacy UPnP devices support
+input discovery and selection, but not per-input configuration.
+
+---
+
+### Input Switching via n-Stream Protocol (WORKING!)
+
+Input switching on legacy Naim devices uses the **n-Stream/BridgeCo protocol** on
+**TCP port 15555**. This is the same protocol used by the official Naim app.
+
+| Command | Options | Description |
+|---------|---------|-------------|
+| `nstream-set-input` | `--input <name>` | Switch to specified input |
+| `nstream-get-input` | — | Get current input (raw response) |
+| `nstream-input-up` | — | Cycle to next input |
+| `nstream-input-down` | — | Cycle to previous input |
+| `nstream-inputs` | — | List valid input names |
+
+```bash
+# Switch to Digital Input 2
+./naim_control_upnp.py --host 192.168.1.21 nstream-set-input --input DIGITAL2
+
+# Switch to UPnP streaming
+./naim_control_upnp.py --host 192.168.1.21 nstream-set-input --input UPNP
+
+# Cycle through inputs
+./naim_control_upnp.py --host 192.168.1.21 nstream-input-up
+./naim_control_upnp.py --host 192.168.1.21 nstream-input-down
+
+# List all valid input names
+./naim_control_upnp.py nstream-inputs
+```
+
+**Valid input names:** `UPNP`, `DIGITAL1`-`DIGITAL10`, `ANALOGUE1`-`ANALOGUE5`,
+`CD`, `FM`, `DAB`, `IRADIO`, `USB`, `BLUETOOTH`, `AIRPLAY`, `SPOTIFY`, `TIDAL`
+
+### IR Control (DOES NOT WORK - Use n-Stream Instead)
+
+The `X_HtmlPageHandler` UPnP service has an IR control action, but **use n-Stream
+commands instead** - they actually work.
+
+| Command | Options | Description |
+|---------|---------|-------------|
+| `ir-send` | `--code <code>` | Send raw IR code (fails with error 401) |
+| `ir-list` | — | List known IR codes (for reference only) |
+| `input-switch` | `--input <name>` `--force` | Legacy IR attempt (fails) |
+| `inputs-ir` | — | List inputs (reference only) |
+
+**Note:** The IR commands are kept for historical reference but do not work.
+Use the `nstream-*` commands for input control.
+
+---
+
 ### Quick shell alias for legacy devices
 
 Add to `~/.bashrc` or `~/.zshrc`:
@@ -760,7 +858,34 @@ naim-legacy transport-info
 **SOAP fault errors**
 - The device may not support the requested action
 - Check `info` output to see which services are available
+- Use `services -v` to see all available actions
 
 **Device not found via discover**
 - Ensure the device is powered on
 - Some legacy devices take longer to respond to SSDP; increase `--timeout`
+
+**ContentDirectory errors / No inputs found**
+- Not all legacy devices expose inputs via ContentDirectory
+- Use `services` to check if ContentDirectory service is available
+- Try browsing different ObjectIDs: `input-browse --object-id 0/0`
+
+---
+
+## Input Features: REST API vs UPnP Comparison
+
+Legacy Naim devices (UPnP) have more limited input control compared to newer
+devices (REST API). Here's what's available on each platform:
+
+| Feature | REST API (newer) | UPnP (legacy) |
+|---------|------------------|---------------|
+| List available inputs | ✅ `inputs-list` | ✅ `inputs-list` (via ContentDirectory) |
+| Select/switch input | ✅ `input-select` | ✅ `input-select` (via SetAVTransportURI) |
+| Show current input | ✅ `nowplaying` | ✅ `current-input` |
+| Rename input (alias) | ✅ `input-rename` | ❌ Not supported |
+| Enable/disable input | ✅ `input-disable` | ❌ Not supported |
+| Input volume trim | ✅ `input-trim` | ❌ Not supported |
+| Input sensitivity | ✅ `input-sensitivity` | ❌ Not supported |
+| Unity gain mode | ✅ `input-unity-gain` | ❌ Not supported |
+
+If you need advanced input settings on a legacy device, check if your device
+also supports the REST API on port 15081 — some transitional models support both.

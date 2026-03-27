@@ -1,15 +1,18 @@
-# Naim Streamer Control Protocols — Analysis
+# Naim Streamer Control Protocols — Detailed Specifications
+
+> **For a high-level overview of all protocols, see [PROTOCOL_OVERVIEW.md](PROTOCOL_OVERVIEW.md)**
 
 Reverse-engineered from the Naim Android application (decompiled APK).
 All findings are based on static analysis of Retrofit interface declarations,
 Moshi JSON model classes, and enum definitions found in the decompiled source.
 
-Naim devices use **two distinct control protocols** depending on the device generation:
+Naim devices use **three distinct control protocols** depending on the device generation:
 
 | Protocol | Script | Devices | Port |
 |----------|--------|---------|------|
-| **REST API** | `naim_control_rest.py` | Newer devices (Uniti series, Mu-so 2nd gen, etc.) | 15081 |
-| **UPnP/DLNA** | `naim_control_upnp.py` | Legacy devices (SuperUniti, NDS, NDX, UnitiQute, etc.) | 8080 |
+| **REST API (Leo)** | `naim_control_rest.py` | Newer devices (Uniti series, Mu-so 2nd gen, etc.) | 15081 |
+| **UPnP/DLNA** | `naim_control_upnp.py` | All devices (playback, volume) | 8080 |
+| **n-Stream (BridgeCo)** | `naim_control_nstream.py` | Legacy devices (input switching/management) | 15555 |
 
 ---
 
@@ -40,11 +43,22 @@ Naim devices use **two distinct control protocols** depending on the device gene
 11. [HTTP Client Behaviour](#11-http-client-behaviour)
 12. [Known Limitations & Notes](#12-known-limitations--notes)
 
-### Part B — UPnP/DLNA (legacy devices)
+### Part B — UPnP/DLNA (all devices)
 
 13. [UPnP/DLNA Protocol Overview](#13-upnpdlna-protocol-overview)
 14. [UPnP Services & Control URLs](#14-upnp-services--control-urls)
 15. [SOAP Action Reference](#15-soap-action-reference)
+16. [Input Discovery via ContentDirectory](#16-input-discovery-via-contentdirectory)
+17. [ConnectionManager Service](#17-connectionmanager-service)
+18. [Input Settings Limitations on Legacy Devices](#18-input-settings-limitations-on-legacy-devices)
+19. [Service Discovery via SCPD](#19-service-discovery-via-scpd)
+20. [X_HtmlPageHandler Service (DM Holdings)](#20-x_htmlpagehandler-service-dm-holdings)
+
+### Part C — n-Stream/BridgeCo Protocol (legacy devices)
+
+21. [SuperUniti Device Profile](#21-superuniti-device-profile)
+22. [n-Stream Protocol Architecture](#22-n-stream-protocol-architecture)
+23. [NVM Command Reference](#23-nvm-command-reference)
 
 ---
 
@@ -1330,3 +1344,707 @@ All RenderingControl actions use `InstanceID=0` and `Channel=Master`.
 | `SetVolume` | `DesiredVolume=<0-100>` | Set volume level |
 | `GetMute` | — | Returns: `CurrentMute` (0 or 1) |
 | `SetMute` | `DesiredMute=<0\|1>` | Set mute state |
+| `GetLoudness` | — | Returns: `CurrentLoudness` (0 or 1) — may not be supported |
+
+---
+
+## 16. Input Discovery via ContentDirectory
+
+Legacy Naim devices expose available inputs through the **ContentDirectory** service,
+which is part of the standard UPnP AV architecture. Inputs are organized as a
+hierarchical container structure that can be browsed.
+
+### ContentDirectory Service
+
+| Property | Value |
+|----------|-------|
+| Service Type | `urn:schemas-upnp-org:service:ContentDirectory:1` |
+| Default Control URL | `/ContentDirectory/ctrl` |
+
+### Browse Action
+
+The `Browse` action is used to navigate the content hierarchy:
+
+| Argument | Value | Description |
+|----------|-------|-------------|
+| `ObjectID` | `"0"` | Root container; `"0/0"` for inputs on some devices |
+| `BrowseFlag` | `"BrowseDirectChildren"` | List children; `"BrowseMetadata"` for item details |
+| `Filter` | `"*"` | Return all metadata fields |
+| `StartingIndex` | `"0"` | Pagination start |
+| `RequestedCount` | `"100"` | Max items to return |
+| `SortCriteria` | `""` | Sort order (usually empty) |
+
+### DIDL-Lite Response Format
+
+Browse results are returned as DIDL-Lite XML in the `Result` field:
+
+```xml
+<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"
+           xmlns:dc="http://purl.org/dc/elements/1.1/"
+           xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">
+  <container id="0/0" parentID="0" restricted="1">
+    <dc:title>Inputs</dc:title>
+    <upnp:class>object.container</upnp:class>
+  </container>
+  <item id="0/1" parentID="0" restricted="1">
+    <dc:title>Digital 1</dc:title>
+    <upnp:class>object.item.audioItem</upnp:class>
+    <res protocolInfo="http-get:*:audio/x-naim-digital:*">x-naim-input:digital1</res>
+  </item>
+</DIDL-Lite>
+```
+
+### Common Naim Input ObjectIDs
+
+The exact ObjectID structure varies by device model. Common patterns:
+
+| ObjectID | Description |
+|----------|-------------|
+| `0` | Root container |
+| `0/0` | Inputs container (device-specific) |
+| `0/1` | Media servers / UPnP sources |
+| `0/2` | Internet radio |
+| `0/n` | Various input types |
+
+### Input Selection via SetAVTransportURI
+
+Once an input's resource URI is obtained from ContentDirectory browsing, it can
+be selected using the AVTransport `SetAVTransportURI` action:
+
+```
+Action: SetAVTransportURI
+Arguments:
+  InstanceID: 0
+  CurrentURI: <URI from res element>
+  CurrentURIMetaData: <DIDL-Lite XML>
+```
+
+Naim-specific input URIs may use schemes like:
+- `x-naim-input:digital1`
+- `x-naim-input:analog1`
+- `x-rincon:*` (for certain streaming inputs)
+
+After setting the URI, call `Play` to start playback from the selected input.
+
+---
+
+## 17. ConnectionManager Service
+
+The ConnectionManager service provides information about supported media types
+and transport protocols.
+
+| Property | Value |
+|----------|-------|
+| Service Type | `urn:schemas-upnp-org:service:ConnectionManager:1` |
+| Default Control URL | `/ConnectionManager/ctrl` |
+
+### GetProtocolInfo Action
+
+Returns supported protocols for sending (Source) and receiving (Sink):
+
+| Output | Description |
+|--------|-------------|
+| `Source` | Comma-separated list of protocols the device can send |
+| `Sink` | Comma-separated list of protocols the device can receive |
+
+Protocol format: `<protocol>:<network>:<contentType>:<additionalInfo>`
+
+Example protocols for Naim devices:
+- `http-get:*:audio/flac:*`
+- `http-get:*:audio/mpeg:*`
+- `http-get:*:audio/x-wav:*`
+- `http-get:*:audio/x-aiff:*`
+
+---
+
+## 18. Input Settings Limitations on Legacy Devices
+
+Unlike newer Naim devices with the REST API, legacy UPnP devices have limited
+support for input-specific settings:
+
+### Available on Legacy (UPnP) Devices
+- Input discovery (via ContentDirectory browsing)
+- Input selection (via SetAVTransportURI)
+- Master volume control
+- Mute control
+- Loudness (on some models)
+
+### NOT Available on Legacy (UPnP) Devices
+The following settings require the REST API (newer devices only):
+- Input trim (per-input volume adjustment)
+- Input alias/rename
+- Input enable/disable
+- Input sensitivity
+- Unity gain mode
+
+If you need these features on a legacy device, check if your device has a REST API
+on port 15081 — some devices may support both protocols.
+
+---
+
+## 19. Service Discovery via SCPD
+
+Each UPnP service publishes an SCPD (Service Control Protocol Description) XML
+document that lists all available actions and state variables. This can be used
+to discover device-specific capabilities.
+
+The SCPD URL is found in `description.xml` under each service's `<SCPDURL>` element.
+
+Example SCPD content:
+
+```xml
+<scpd xmlns="urn:schemas-upnp-org:service-1-0">
+  <actionList>
+    <action>
+      <name>Browse</name>
+      <argumentList>
+        <argument>
+          <name>ObjectID</name>
+          <direction>in</direction>
+        </argument>
+        <!-- ... more arguments ... -->
+      </argumentList>
+    </action>
+  </actionList>
+</scpd>
+```
+
+Use the `services -v` command to view all available actions on a device.
+
+---
+
+## 20. X_HtmlPageHandler Service (DM Holdings)
+
+Some legacy Naim devices include a proprietary service from DM Holdings
+for web interface control.
+
+| Property | Value |
+|----------|-------|
+| Service Type | `urn:schemas-dm-holdings-com:service:X_HtmlPageHandler:1` |
+| Default Control URL | `/HtmlPageHandler/ctrl` |
+
+### Actions
+
+| Action | Arguments | Description |
+|--------|-----------|-------------|
+| `actHtmlDeviceName` | `argHtmlDeviceName` (in) | Set device friendly name |
+| `actHtmlRefresh` | `argHtmlRefresh` (in) | Refresh/reload |
+| `actHtmlTcpip` | Multiple network args (in) | Configure network settings |
+| `actHtmlIrControl` | `argIrControl` (in) | Send IR command |
+
+### IR Control (EXPERIMENTAL)
+
+The `actHtmlIrControl` action is intended for sending infrared remote control
+commands to the device. However, the exact format of the `argIrControl` parameter
+is **not yet documented**.
+
+Testing on SuperUniti firmware 2.0.11.14171 returns UPnP error 401 (Invalid Action)
+for various attempted formats:
+- Decimal codes (e.g., "51", "53")
+- Hex codes (e.g., "0x33")
+- String names (e.g., "input_digital2")
+
+**Research needed:** The command format may be:
+- Raw NEC/RC5/RC6 protocol codes
+- Proprietary Naim encoding
+- A specific string format
+
+If you discover the correct format, please document it!
+
+---
+
+## 21. SuperUniti Device Profile
+
+The Naim SuperUniti (and similar legacy devices) has been tested with the following
+characteristics:
+
+### Device Information
+- **Model:** SuperUniti
+- **Device Type:** `urn:schemas-upnp-org:device:MediaRenderer:1`
+- **Manufacturer:** Naim Audio Ltd.
+- **Firmware:** 2.0.11.14171 (tested)
+- **UPnP Port:** 8080
+- **Web Interface:** Port 80 (`/index.asp`)
+
+### Available Services
+1. `RenderingControl:1` - Volume, mute, loudness
+2. `ConnectionManager:1` - Protocol info
+3. `AVTransport:1` - Playback control (15 actions)
+4. `X_HtmlPageHandler:1` - Web/IR control (limited)
+
+### NOT Available
+- ContentDirectory service (no input browsing via UPnP)
+- REST API on port 15081
+- Input trim/alias/enable via UPnP
+
+### Supported Audio Formats (via ConnectionManager)
+The device reports support for:
+- PCM: L16, L24 at 44.1/48/88.2/96 kHz
+- Compressed: MP3, WMA, OGG, M4A, AAC
+- Lossless: FLAC, WAV, AIFF
+- High-res: DSD, DSF, DFF
+
+### Input Control via n-Stream Protocol
+
+**DISCOVERY:** Input switching on legacy Naim devices uses the **n-Stream/BridgeCo protocol**
+on **TCP port 15555**, NOT UPnP or IR commands.
+
+#### Protocol Details
+
+| Property | Value |
+|----------|-------|
+| Port | TCP 15555 |
+| Protocol | XML-based (BridgeCo) with two layers |
+| Command Format | Base64-encoded NVM commands wrapped in XML |
+
+#### Protocol Architecture
+
+The n-Stream protocol has **two layers**:
+
+1. **BC (BridgeCo) Layer** - Handles connection setup and API version negotiation
+2. **Tunnel Layer** - Carries NVM commands wrapped in Base64
+
+#### Required Initialization Sequence
+
+Before NVM commands (like input switching) will work, the connection MUST be initialized:
+
+**Step 1: Send RequestAPIVersion (BC layer)**
+```xml
+<command>
+  <name>RequestAPIVersion</name>
+  <id>1</id>
+  <map>
+    <item><name>module</name><string>naim</string></item>
+    <item><name>version</name><string>1</string></item>
+  </map>
+</command>
+```
+
+**Step 2: Enable unsolicited messages (via Tunnel)**
+```xml
+<command>
+  <name>TunnelToHost</name>
+  <id>2</id>
+  <map>
+    <item>
+      <name>data</name>
+      <base64>[Base64 of "*NVM SETUNSOLICITED ON\r"]</base64>
+    </item>
+  </map>
+</command>
+```
+
+**Step 3: Now NVM commands will work**
+
+#### Tunnel Command Structure
+
+Commands like `*NVM SETINPUT DIGITAL2\r` are Base64-encoded and wrapped in XML:
+
+```xml
+<command>
+  <name>TunnelToHost</name>
+  <id>3</id>
+  <map>
+    <item>
+      <name>data</name>
+      <base64>[Base64 encoded "*NVM SETINPUT DIGITAL2\r"]</base64>
+    </item>
+  </map>
+</command>
+```
+
+#### Input Control Commands
+
+| Command | Description |
+|---------|-------------|
+| `*NVM SETINPUT <input>\r` | Switch to specified input |
+| `*NVM GETINPUT\r` | Get current input |
+| `*NVM INPUT+\r` | Cycle to next input |
+| `*NVM INPUT-\r` | Cycle to previous input |
+| `*NVM GETINPUTBLK\r` | Get all inputs (bulk query, returns multiple responses) |
+| `*NVM SETINPUTENABLED <input> ON\|OFF\r` | Enable/disable input |
+| `*NVM GETINPUTENABLED <input>\r` | Check if input is enabled |
+| `*NVM SETINPUTNAME <input> "<name>"\r` | Set input display name/alias |
+| `*NVM GETINPUTNAME <input>\r` | Get input display name |
+
+#### Valid Input Names
+
+| Category | Inputs |
+|----------|--------|
+| Streaming | `UPNP`, `IRADIO`, `SPOTIFY`, `TIDAL`, `AIRPLAY`, `BLUETOOTH` |
+| Digital | `DIGITAL1` through `DIGITAL10` |
+| Analog | `ANALOGUE1` through `ANALOGUE5`, `PHONO` |
+| Other | `USB`, `CD`, `FM`, `DAB`, `FRONT`, `MULTIROOM`, `IPOD` |
+| HDMI | `HDMI1` through `HDMI5` |
+
+#### Usage with naim_control_nstream.py
+
+```bash
+# List all inputs available on the device
+./naim_control_nstream.py --host 192.168.1.21 inputs
+
+# Switch to Digital Input 2
+./naim_control_nstream.py --host 192.168.1.21 set-input --input DIGITAL2
+
+# Switch to UPnP streaming
+./naim_control_nstream.py --host 192.168.1.21 set-input --input UPNP
+
+# Get current input
+./naim_control_nstream.py --host 192.168.1.21 get-input
+
+# Cycle through inputs
+./naim_control_nstream.py --host 192.168.1.21 input-up
+./naim_control_nstream.py --host 192.168.1.21 input-down
+
+# Enable/disable inputs
+./naim_control_nstream.py --host 192.168.1.21 input-enable --input DIGITAL1
+./naim_control_nstream.py --host 192.168.1.21 input-disable --input DIGITAL1
+./naim_control_nstream.py --host 192.168.1.21 input-enabled --input DIGITAL1
+
+# Rename inputs (set custom display name)
+./naim_control_nstream.py --host 192.168.1.21 input-rename --input DIGITAL1 --name "TV Audio"
+./naim_control_nstream.py --host 192.168.1.21 input-name --input DIGITAL1
+
+# Device info
+./naim_control_nstream.py --host 192.168.1.21 product
+./naim_control_nstream.py --host 192.168.1.21 version
+./naim_control_nstream.py --host 192.168.1.21 mac
+./naim_control_nstream.py --host 192.168.1.21 preamp
+```
+
+#### Note on X_HtmlPageHandler IR Control
+
+The X_HtmlPageHandler IR control action (`actHtmlIrControl`) via UPnP consistently returns
+error 401. This is likely because input switching was always intended to use the n-Stream
+protocol on port 15555, not UPnP. The IR control action may be reserved for other purposes
+or disabled.
+
+---
+
+## 22. n-Stream Protocol Architecture
+
+The n-Stream protocol is a proprietary TCP-based protocol built on the BridgeCo platform.
+It provides access to device-specific features not available via UPnP.
+
+### Protocol Layers
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                      Application Layer                               │
+│   NVM Commands: *NVM SETINPUT, *NVM GETINPUT, *NVM VOL+, etc.       │
+└─────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Tunnel Layer                                  │
+│   XML Command: <command><name>TunnelToHost</name>...</command>      │
+│   Payload: Base64-encoded NVM command in <base64> element           │
+└─────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    BC (BridgeCo) Layer                               │
+│   Connection setup: RequestAPIVersion, Disconnect                    │
+│   API negotiation: module="naim", version="1"                        │
+└─────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                        TCP Socket                                    │
+│   Port: 15555, Encoding: UTF-8, No framing (XML documents)          │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### BC (BridgeCo) Layer Commands
+
+These commands operate at the connection level, before tunnel commands work.
+
+#### RequestAPIVersion
+
+Sent immediately after connecting to negotiate API version:
+
+```xml
+<command>
+  <name>RequestAPIVersion</name>
+  <id>1</id>
+  <map>
+    <item><name>module</name><string>naim</string></item>
+    <item><name>version</name><string>1</string></item>
+  </map>
+</command>
+```
+
+#### Disconnect
+
+Sent when closing the connection cleanly:
+
+```xml
+<command id="0" name="Disconnect"/>
+```
+
+### Tunnel Layer Commands
+
+NVM commands are wrapped in TunnelToHost messages with Base64 encoding:
+
+```xml
+<command>
+  <name>TunnelToHost</name>
+  <id>2</id>
+  <map>
+    <item>
+      <name>data</name>
+      <base64>[Base64-encoded NVM command]</base64>
+    </item>
+  </map>
+</command>
+```
+
+### Responses
+
+The device responds with `TunnelFromHost` messages containing Base64-encoded responses:
+
+```xml
+<reply>
+  <name>TunnelFromHost</name>
+  <id>2</id>
+  <map>
+    <item>
+      <name>data</name>
+      <base64>[Base64-encoded response]</base64>
+    </item>
+  </map>
+</reply>
+```
+
+### Connection Initialization Sequence
+
+This sequence MUST be followed for commands to work:
+
+```
+Client                                  Device
+   │                                      │
+   │──── TCP Connect (port 15555) ───────>│
+   │                                      │
+   │──── RequestAPIVersion ──────────────>│
+   │<─── Reply (API version accepted) ────│
+   │                                      │
+   │──── TunnelToHost: *NVM SETUNSOLICITED ON\r ─>│
+   │<─── TunnelFromHost: response ────────│
+   │                                      │
+   │     (Connection is now ready)        │
+   │                                      │
+   │──── TunnelToHost: *NVM SETINPUT X\r ─>│
+   │<─── TunnelFromHost: response ────────│
+   │                                      │
+   │──── Disconnect ─────────────────────>│
+   │                                      │
+```
+
+### Source Files (from decompiled Naim app)
+
+| Class | Purpose |
+|-------|---------|
+| `Connection.java` | TCP socket management, port 15555 |
+| `BCManager.java` | BC-layer connection lifecycle |
+| `BCQueue.java` | Command queue for BC layer |
+| `TunnelManager.java` | Startup sequence orchestration |
+| `TunnelQueue.java` | Command queue for tunnel layer |
+| `TunnelCommand.java` | Tunnel command construction |
+| `TunnelConversation.java` | Request/response pairing |
+| `CommandTunnelSendMessage.java` | XML/Base64 encoding |
+| `UnitiConnectionManagerService.java` | NVM command implementations |
+
+---
+
+## 23. NVM Command Reference
+
+NVM (Naim Virtual Machine) commands control device functions. Commands are ASCII strings
+terminated with `\r` (carriage return).
+
+### Command Format
+
+```
+*NVM <COMMAND> [<ARGS>...]\r
+```
+
+### Response Format
+
+Responses are prefixed with `#NVM` and have space-separated fields:
+
+```
+#NVM <COMMAND> <VALUE1> <VALUE2> ...
+```
+
+For commands that return OK:
+```
+#NVM <COMMAND> OK
+```
+
+Error responses:
+```
+#NVM ERROR <COMMAND> <ERROR_CODE>
+```
+
+### Input Control Commands
+
+| Command | Description | Response |
+|---------|-------------|----------|
+| `*NVM SETINPUT <name>\r` | Switch to input | `#NVM SETINPUT OK` |
+| `*NVM GETINPUT\r` | Get current input | `#NVM GETINPUT <name>` |
+| `*NVM INPUT+\r` | Next input | `#NVM INPUT+ <name>` |
+| `*NVM INPUT-\r` | Previous input | `#NVM INPUT- <name>` |
+| `*NVM GETINPUTBLK\r` | Get all inputs (bulk) | Multiple `#NVM GETINPUTBLK` responses (see below) |
+| `*NVM SETINPUTENABLED <name> ON\|OFF\r` | Enable/disable input | `#NVM SETINPUTENABLED OK` |
+| `*NVM GETINPUTENABLED <name>\r` | Check if enabled | `#NVM GETINPUTENABLED <name> ON\|OFF` |
+| `*NVM SETINPUTNAME <name> "<display>"\r` | Set input display name | `#NVM SETINPUTNAME OK` |
+| `*NVM GETINPUTNAME <name>\r` | Get input display name | `#NVM GETINPUTNAME <name> "<display>"` |
+| `*NVM GETINPUTTRIM <name>\r` | Get input trim level | `#NVM GETINPUTTRIM <name> <level>` |
+| `*NVM SETINPUTTRIM <name> <level>\r` | Set input trim level | `#NVM SETINPUTTRIM OK` |
+
+### GETINPUTBLK Response Format
+
+The `GETINPUTBLK` command returns one response line per input:
+
+```
+#NVM GETINPUTBLK <index> <total> <active> <input_id> "<display_name>"
+```
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `<index>` | Input number (1-based) | `5` |
+| `<total>` | Total number of inputs | `18` |
+| `<active>` | Whether input is enabled (0=disabled, 1=enabled) | `1` |
+| `<input_id>` | Input identifier | `UPNP` |
+| `<display_name>` | Display name (quoted) | `"UPnP"` |
+
+Example response (multiple lines):
+```
+#NVM GETINPUTBLK 1 18 0 FM "FM"
+#NVM GETINPUTBLK 2 18 0 DAB "DAB"
+#NVM GETINPUTBLK 3 18 0 IRADIO "iRadio"
+#NVM GETINPUTBLK 4 18 0 MULTIROOM "Multiroom"
+#NVM GETINPUTBLK 5 18 1 UPNP "UPnP"
+...
+```
+
+### Volume/Preamp Commands
+
+| Command | Description | Response |
+|---------|-------------|----------|
+| `*NVM VOL+\r` | Volume up | `#NVM VOL+ <level>` |
+| `*NVM VOL-\r` | Volume down | `#NVM VOL- <level>` |
+| `*NVM GETPREAMP\r` | Get preamp status | `#NVM PREAMP <vol> <mute> <balance> <input> ... "<inputname>" ...` |
+| `*NVM GETBAL\r` | Get balance | `#NVM GETBAL <level>` |
+| `*NVM SETBAL <level>\r` | Set balance | `#NVM SETBAL OK` |
+
+### GETPREAMP Response Format
+
+The `GETPREAMP` command returns detailed preamp status:
+
+```
+#NVM PREAMP <volume> <mute> <balance> <input_id> <arg5> <arg6> <arg7> <arg8> "<input_name>" <arg10>
+```
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `<volume>` | Current volume level (0-100) | `76` |
+| `<mute>` | Mute status (0=unmuted, 1=muted) | `0` |
+| `<balance>` | Balance level | `0` |
+| `<input_id>` | Current input identifier | `UPNP` |
+| `<input_name>` | Current input display name (quoted) | `"UPnP"` |
+
+### Device Info Commands
+
+| Command | Description | Response |
+|---------|-------------|----------|
+| `*NVM PRODUCT\r` | Get product type | `#NVM PRODUCT <type>` |
+| `*NVM VERSION\r` | Get firmware version | `#NVM VERSION <ver> <build> <type> <release>` |
+| `*NVM GETSEDMPTYPE\r` | Get hardware version | `#NVM GETSEDMPTYPE <type>` |
+| `*NVM GETSEDMPCAPS\r` | Get DMP capabilities | `#NVM GETSEDMPCAPS <caps>` |
+| `*NVM GETMAC\r` | Get MAC address | `#NVM GETMAC <b1> <b2> <b3> <b4> <b5> <b6>` (6 hex bytes) |
+| `*NVM GETLANG\r` | Get language setting | `#NVM GETLANG <code>` |
+
+### System Commands
+
+| Command | Description | Response |
+|---------|-------------|----------|
+| `*NVM SETUNSOLICITED ON\|OFF\r` | Enable/disable unsolicited messages | `#NVM SETUNSOLICITED OK` |
+| `*NVM SYNCDISP ON\|OFF\r` | Sync display state | `#NVM SYNCDISP OK` |
+| `*NVM DEBUG ON\|OFF\r` | Enable debug output | `#NVM DEBUG OK` |
+| `*NVM GETAUTOSTANDBYPERIOD\r` | Get auto-standby timeout | `#NVM GETAUTOSTANDBYPERIOD <mins>` |
+| `*NVM SETAUTOSTANDBYPERIOD <mins>\r` | Set auto-standby timeout | `#NVM SETAUTOSTANDBYPERIOD OK` |
+
+### Alarm Commands
+
+| Command | Description |
+|---------|-------------|
+| `*NVM GETDATETIME\r` | Get device date/time |
+| `*NVM GETALARMWEEKDAY\r` | Get weekday alarm |
+| `*NVM SETALARMWEEKDAY ON <time> <input> <vol>\r` | Set weekday alarm |
+| `*NVM GETALARMWEEKEND\r` | Get weekend alarm |
+| `*NVM SETALARMWEEKEND ON <time> <input> <vol>\r` | Set weekend alarm |
+| `*NVM GETALARMACTIVE\r` | Check if alarm is active |
+| `*NVM CANCELACTIVEALARM CONT\r` | Cancel active alarm |
+
+### Radio Commands
+
+| Command | Description |
+|---------|-------------|
+| `*NVM GETIRADIOHIDDENROWS\r` | Get hidden iRadio rows |
+| `*NVM GETBLASTCAPS\r` | Get IR blaster capabilities |
+
+### Initial Startup Command
+
+Used during app startup to get multiple values at once:
+
+| Command | Description |
+|---------|-------------|
+| `*NVM GETINITIALINFO\r` | Get startup info (alarm, hidden rows, language, product, trackers, input, IR caps, multiroom) |
+| `*NVM GETCHGTRACKERS\r` | Get change trackers |
+
+### Product Type Codes
+
+| Code | Device |
+|------|--------|
+| `SUPER_UNITI` | SuperUniti |
+| `UNITI_LITE` | UnitiLite |
+| `QUTE` | UnitiQute |
+| `NDS` | NDS |
+| `NDX` | NDX |
+| `ND5XS` | ND5 XS |
+| `NAC172` | NAC-N 172 XS |
+| `NAC272` | NAC-N 272 |
+
+### Error Codes
+
+| Code | Meaning |
+|------|---------|
+| `401` | Invalid argument |
+| `402` | Command not supported |
+| `403` | Input not available |
+| `404` | Resource not found |
+| `500` | Internal error |
+
+---
+
+## Appendix: Protocol Evolution
+
+### Legacy Era (2008-2015)
+
+- SuperUniti, NDS, NDX, UnitiQute
+- Primary protocol: n-Stream/BridgeCo on port 15555
+- UPnP for playback only
+- No REST API
+
+### Transition Era (2015-2018)
+
+- NAC-N 272, ND5 XS 2
+- Added REST API (Leo) on port 15081
+- n-Stream still used for some functions
+
+### Modern Era (2018+)
+
+- Uniti Atom, Star, Nova; Mu-so 2nd gen
+- REST API (Leo) is primary protocol
+- UPnP maintained for compatibility
+- n-Stream deprecated (not present on newer devices)

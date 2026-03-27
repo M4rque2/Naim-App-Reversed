@@ -1,3 +1,5 @@
 naim-decompiled/*
 *.apk
+*.pyc
 .claude/*
+naim-atom-home-assistant/*
