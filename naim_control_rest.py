@@ -9,6 +9,7 @@ a JSON REST API on port 15081.
 """
 
 import argparse
+import asyncio
 import json
 import socket
 import sys
@@ -20,6 +21,7 @@ import urllib.error
 import xml.etree.ElementTree as ET
 
 DEFAULT_PORT = 15081
+DEFAULT_WS_PORT = 4545
 
 # ─────────────────────────────────────────────
 # DEVICE DISCOVERY
@@ -484,8 +486,10 @@ def cmd_toggle(args):
 
 
 def cmd_seek(args):
-    """GET /nowplaying?cmd=seek&position=<seconds>"""
-    pretty(GET(args.host, args.port, "nowplaying", {"cmd": "seek", "position": args.position}))
+    """GET /nowplaying?cmd=seek&position=<milliseconds>"""
+    # Convert seconds to milliseconds for the API
+    position_ms = int(args.position * 1000)
+    pretty(GET(args.host, args.port, "nowplaying", {"cmd": "seek", "position": position_ms}))
 
 
 def cmd_repeat(args):
@@ -529,15 +533,15 @@ def cmd_volume_set(args):
 
 
 def cmd_mute(args):
-    """PUT /<ussi>?mute=true"""
-    ussi = args.ussi or "levels"
-    pretty(PUT(args.host, args.port, ussi, {"mute": "true"}))
+    """PUT /<ussi>?mute=1"""
+    ussi = args.ussi or "levels/room"
+    pretty(PUT(args.host, args.port, ussi, {"mute": 1}))
 
 
 def cmd_unmute(args):
-    """PUT /<ussi>?mute=false"""
-    ussi = args.ussi or "levels"
-    pretty(PUT(args.host, args.port, ussi, {"mute": "false"}))
+    """PUT /<ussi>?mute=0"""
+    ussi = args.ussi or "levels/room"
+    pretty(PUT(args.host, args.port, ussi, {"mute": 0}))
 
 
 def cmd_balance(args):
@@ -1108,6 +1112,115 @@ def cmd_api_info(args):
 
 
 # ─────────────────────────────────────────────
+# WEBSOCKET MONITOR (Real-time status updates)
+# ─────────────────────────────────────────────
+
+async def _websocket_monitor(host, port, duration, raw_output):
+    """Monitor WebSocket stream for real-time status updates."""
+    decoder = json.JSONDecoder()
+    buffer = ""
+
+    print(f"Connecting to WebSocket at {host}:{port}...")
+
+    try:
+        reader, writer = await asyncio.open_connection(host, port)
+        print(f"Connected! Monitoring for {duration} seconds (Ctrl+C to stop)...\n")
+
+        start_time = time.time()
+        while time.time() - start_time < duration:
+            try:
+                data = await asyncio.wait_for(reader.read(4096), timeout=1.0)
+                if not data:
+                    print("Connection closed by server")
+                    break
+
+                buffer += data.decode("utf-8")
+                while buffer:
+                    try:
+                        obj, idx = decoder.raw_decode(buffer)
+                        buffer = buffer[idx:]
+
+                        if raw_output:
+                            print(json.dumps(obj, indent=2))
+                            print("-" * 40)
+                        else:
+                            # Parse and display formatted status
+                            _display_status(obj)
+                    except json.JSONDecodeError:
+                        break
+            except asyncio.TimeoutError:
+                continue
+            except KeyboardInterrupt:
+                break
+
+        writer.close()
+        await writer.wait_closed()
+        print("\nMonitoring stopped.")
+
+    except ConnectionRefusedError:
+        print(f"Error: Could not connect to {host}:{port}")
+        print("Make sure the device is powered on and supports WebSocket on port 4545.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def _display_status(obj):
+    """Display formatted status from WebSocket message."""
+    data = obj.get("data", {})
+    play_time = obj.get("playTime", {})
+
+    # Extract useful fields
+    state = data.get("state", "unknown")
+    track_roles = data.get("trackRoles", {})
+    title = track_roles.get("title", "")
+    icon = track_roles.get("icon", "")
+
+    media_data = track_roles.get("mediaData", {})
+    meta_data = media_data.get("metaData", {})
+    artist = meta_data.get("artist", "")
+    album = meta_data.get("album", "")
+
+    active_resource = media_data.get("activeResource", {})
+    bits_per_sample = active_resource.get("bitsPerSample", "")
+    sample_freq = active_resource.get("sampleFrequency", "")
+
+    status = data.get("status", {})
+    duration_ms = status.get("duration", 0)
+    position_ms = play_time.get("i64_", 0)
+
+    # Format times
+    def format_time(ms):
+        if not ms:
+            return "--:--"
+        secs = int(ms / 1000)
+        mins = secs // 60
+        secs = secs % 60
+        return f"{mins}:{secs:02d}"
+
+    # Build output
+    timestamp = time.strftime("%H:%M:%S")
+    print(f"[{timestamp}] State: {state.upper()}")
+    if title:
+        print(f"  Track: {title}")
+    if artist:
+        print(f"  Artist: {artist}")
+    if album:
+        print(f"  Album: {album}")
+    if duration_ms:
+        print(f"  Position: {format_time(position_ms)} / {format_time(duration_ms)}")
+    if bits_per_sample and sample_freq:
+        print(f"  Audio: {bits_per_sample}bit / {sample_freq}Hz")
+    print()
+
+
+def cmd_monitor(args):
+    """Connect to WebSocket and monitor real-time status updates."""
+    asyncio.run(_websocket_monitor(args.host, args.ws_port, args.duration, args.raw))
+
+
+# ─────────────────────────────────────────────
 # CLI SETUP
 # ─────────────────────────────────────────────
 
@@ -1130,6 +1243,9 @@ Examples:
   %(prog)s --host 192.168.1.50 volume-set --level 40
   %(prog)s --host 192.168.1.50 input-select --ussi inputs/tidal
   %(prog)s --host 192.168.1.50 alarm-list
+  %(prog)s --host 192.168.1.50 monitor              # Real-time status (WebSocket port 4545)
+  %(prog)s --host 192.168.1.50 monitor --raw        # Raw JSON output
+  %(prog)s --host 192.168.1.50 monitor --duration 300  # Monitor for 5 minutes
 
 For legacy devices (SuperUniti, NDS, NDX, etc.), use naim_control_upnp.py instead.
         """,
@@ -1146,6 +1262,16 @@ For legacy devices (SuperUniti, NDS, NDX, etc.), use naim_control_upnp.py instea
     # ── api-info ──
     p = sub.add_parser("api-info", help="Query supported API versions")
     p.set_defaults(func=cmd_api_info)
+
+    # ── MONITOR (WebSocket) ──
+    p = sub.add_parser("monitor", help="Monitor real-time status via WebSocket (port 4545)")
+    p.add_argument("--ws-port", type=int, default=DEFAULT_WS_PORT,
+                   help=f"WebSocket port (default: {DEFAULT_WS_PORT})")
+    p.add_argument("--duration", type=int, default=60,
+                   help="Monitoring duration in seconds (default: 60)")
+    p.add_argument("--raw", action="store_true",
+                   help="Output raw JSON instead of formatted status")
+    p.set_defaults(func=cmd_monitor)
 
     # ── SYSTEM ──
     p = sub.add_parser("system-info", help="Device information")
@@ -1209,7 +1335,7 @@ For legacy devices (SuperUniti, NDS, NDX, etc.), use naim_control_upnp.py instea
     p.set_defaults(func=cmd_toggle)
 
     p = sub.add_parser("seek", help="Seek to position in seconds")
-    p.add_argument("--position", type=int, required=True, help="Position in seconds")
+    p.add_argument("--position", type=float, required=True, help="Position in seconds (converted to ms for API)")
     p.set_defaults(func=cmd_seek)
 
     p = sub.add_parser("repeat", help="Set repeat mode (0=off, 1=all, 2=one)")
