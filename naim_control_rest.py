@@ -9,7 +9,6 @@ a JSON REST API on port 15081.
 """
 
 import argparse
-import asyncio
 import json
 import socket
 import sys
@@ -21,7 +20,6 @@ import urllib.error
 import xml.etree.ElementTree as ET
 
 DEFAULT_PORT = 15081
-DEFAULT_WS_PORT = 4545
 
 # ─────────────────────────────────────────────
 # DEVICE DISCOVERY
@@ -1112,112 +1110,85 @@ def cmd_api_info(args):
 
 
 # ─────────────────────────────────────────────
-# WEBSOCKET MONITOR (Real-time status updates)
+# SSE MONITOR  (real-time push via /notify)
 # ─────────────────────────────────────────────
-
-async def _websocket_monitor(host, port, duration, raw_output):
-    """Monitor WebSocket stream for real-time status updates."""
-    decoder = json.JSONDecoder()
-    buffer = ""
-
-    print(f"Connecting to WebSocket at {host}:{port}...")
-
-    try:
-        reader, writer = await asyncio.open_connection(host, port)
-        print(f"Connected! Monitoring for {duration} seconds (Ctrl+C to stop)...\n")
-
-        start_time = time.time()
-        while time.time() - start_time < duration:
-            try:
-                data = await asyncio.wait_for(reader.read(4096), timeout=1.0)
-                if not data:
-                    print("Connection closed by server")
-                    break
-
-                buffer += data.decode("utf-8")
-                while buffer:
-                    try:
-                        obj, idx = decoder.raw_decode(buffer)
-                        buffer = buffer[idx:]
-
-                        if raw_output:
-                            print(json.dumps(obj, indent=2))
-                            print("-" * 40)
-                        else:
-                            # Parse and display formatted status
-                            _display_status(obj)
-                    except json.JSONDecodeError:
-                        break
-            except asyncio.TimeoutError:
-                continue
-            except KeyboardInterrupt:
-                break
-
-        writer.close()
-        await writer.wait_closed()
-        print("\nMonitoring stopped.")
-
-    except ConnectionRefusedError:
-        print(f"Error: Could not connect to {host}:{port}")
-        print("Make sure the device is powered on and supports WebSocket on port 4545.")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error: {e}")
-        sys.exit(1)
-
-
-def _display_status(obj):
-    """Display formatted status from WebSocket message."""
-    data = obj.get("data", {})
-    play_time = obj.get("playTime", {})
-
-    # Extract useful fields
-    state = data.get("state", "unknown")
-    track_roles = data.get("trackRoles", {})
-    title = track_roles.get("title", "")
-    icon = track_roles.get("icon", "")
-
-    media_data = track_roles.get("mediaData", {})
-    meta_data = media_data.get("metaData", {})
-    artist = meta_data.get("artist", "")
-    album = meta_data.get("album", "")
-
-    active_resource = media_data.get("activeResource", {})
-    bits_per_sample = active_resource.get("bitsPerSample", "")
-    sample_freq = active_resource.get("sampleFrequency", "")
-
-    status = data.get("status", {})
-    duration_ms = status.get("duration", 0)
-    position_ms = play_time.get("i64_", 0)
-
-    # Format times
-    def format_time(ms):
-        if not ms:
-            return "--:--"
-        secs = int(ms / 1000)
-        mins = secs // 60
-        secs = secs % 60
-        return f"{mins}:{secs:02d}"
-
-    # Build output
-    timestamp = time.strftime("%H:%M:%S")
-    print(f"[{timestamp}] State: {state.upper()}")
-    if title:
-        print(f"  Track: {title}")
-    if artist:
-        print(f"  Artist: {artist}")
-    if album:
-        print(f"  Album: {album}")
-    if duration_ms:
-        print(f"  Position: {format_time(position_ms)} / {format_time(duration_ms)}")
-    if bits_per_sample and sample_freq:
-        print(f"  Audio: {bits_per_sample}bit / {sample_freq}Hz")
-    print()
-
+# The Naim app opens a persistent SSE stream to GET /notify with
+# Accept: text/event-stream.  Each event is a JSON object:
+#   { "version": "1", "ussi": "nowplaying", "id": 5,
+#     "parameters": { "transportState": "Playing", "seekPosition": 45000 } }
+# The "ussi" field matches the REST path of the changed resource.
+# "parameters" contains only the fields that changed (partial update).
 
 def cmd_monitor(args):
-    """Connect to WebSocket and monitor real-time status updates."""
-    asyncio.run(_websocket_monitor(args.host, args.ws_port, args.duration, args.raw))
+    """Stream real-time SSE events from GET /notify on port 15081."""
+    url = f"http://{args.host}:{args.port}/notify"
+    ussi_filter = args.ussi.lower() if args.ussi else None
+
+    print(f"Connecting to SSE stream at {url}")
+    if ussi_filter:
+        print(f"Filtering for ussi containing: {ussi_filter!r}")
+    print("Press Ctrl-C to stop.\n")
+
+    req = urllib.request.Request(url)
+    req.add_header("Accept", "text/event-stream")
+    req.add_header("Cache-Control", "no-cache")
+    req.add_header("Connection", "keep-alive")
+
+    try:
+        with urllib.request.urlopen(req, timeout=None) as resp:
+            # SSE wire format: lines of "data: <json>\n" separated by blank lines.
+            # Accumulate a single event's "data:" lines between blank lines.
+            data_lines = []
+            for raw in resp:
+                line = raw.decode("utf-8").rstrip("\r\n")
+
+                if line.startswith("data:"):
+                    data_lines.append(line[5:].lstrip(" "))
+                elif line == "":
+                    # Blank line = end of one event
+                    if data_lines:
+                        payload = "".join(data_lines)
+                        data_lines = []
+                        _sse_display(payload, ussi_filter, args.raw)
+                # (ignore "id:", "event:", "retry:", and comment lines)
+
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    except urllib.error.URLError as e:
+        print(f"Error: Could not connect to {url}: {e.reason}")
+        sys.exit(1)
+
+
+def _sse_display(payload: str, ussi_filter, raw: bool):
+    """Parse and print a single SSE data payload."""
+    try:
+        event = json.loads(payload)
+    except json.JSONDecodeError:
+        # Not valid JSON — print raw and move on
+        print(f"[raw] {payload}")
+        return
+
+    ussi = event.get("ussi", "")
+
+    # Apply optional ussi filter
+    if ussi_filter and ussi_filter not in ussi.lower():
+        return
+
+    if raw:
+        print(json.dumps(event, indent=2))
+        print()
+        return
+
+    # Formatted output
+    ts = time.strftime("%H:%M:%S")
+    params = event.get("parameters", {})
+    event_id = event.get("id", "")
+    print(f"[{ts}] {ussi}  (id={event_id})")
+    if params:
+        max_k = max(len(k) for k in params)
+        for k, v in params.items():
+            print(f"  {k:<{max_k}}  {v}")
+    print()
 
 
 # ─────────────────────────────────────────────
@@ -1243,9 +1214,9 @@ Examples:
   %(prog)s --host 192.168.1.50 volume-set --level 40
   %(prog)s --host 192.168.1.50 input-select --ussi inputs/tidal
   %(prog)s --host 192.168.1.50 alarm-list
-  %(prog)s --host 192.168.1.50 monitor              # Real-time status (WebSocket port 4545)
-  %(prog)s --host 192.168.1.50 monitor --raw        # Raw JSON output
-  %(prog)s --host 192.168.1.50 monitor --duration 300  # Monitor for 5 minutes
+  %(prog)s --host 192.168.1.50 monitor              # SSE real-time events (/notify)
+  %(prog)s --host 192.168.1.50 monitor --ussi nowplaying
+  %(prog)s --host 192.168.1.50 monitor --raw
 
 For legacy devices (SuperUniti, NDS, NDX, etc.), use naim_control_upnp.py instead.
         """,
@@ -1263,14 +1234,12 @@ For legacy devices (SuperUniti, NDS, NDX, etc.), use naim_control_upnp.py instea
     p = sub.add_parser("api-info", help="Query supported API versions")
     p.set_defaults(func=cmd_api_info)
 
-    # ── MONITOR (WebSocket) ──
-    p = sub.add_parser("monitor", help="Monitor real-time status via WebSocket (port 4545)")
-    p.add_argument("--ws-port", type=int, default=DEFAULT_WS_PORT,
-                   help=f"WebSocket port (default: {DEFAULT_WS_PORT})")
-    p.add_argument("--duration", type=int, default=60,
-                   help="Monitoring duration in seconds (default: 60)")
+    # ── MONITOR (SSE) ──
+    p = sub.add_parser("monitor", help="Stream real-time SSE events from GET /notify")
+    p.add_argument("--ussi", default=None,
+                   help="Filter events to a specific resource, e.g. 'nowplaying' or 'levels'")
     p.add_argument("--raw", action="store_true",
-                   help="Output raw JSON instead of formatted status")
+                   help="Print full JSON event instead of formatted output")
     p.set_defaults(func=cmd_monitor)
 
     # ── SYSTEM ──
