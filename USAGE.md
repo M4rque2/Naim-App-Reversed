@@ -1,15 +1,17 @@
-# Naim Streamer Control CLI — Usage Guide
+# Naim Streamer Control — Usage Guide
 
 Reverse-engineered from the Naim Android application. Controls Naim streaming
-devices (Uniti, Mu-so, NAC-N, SuperUniti, NDS, NDX, etc.) over your local network.
+devices (Uniti, Mu-so, NAC-N, SuperUniti, NDS, NDX, etc.) over your local
+network. Also includes a **server-side emulator** for testing without hardware.
 
-There are **two separate scripts** for the two protocol generations:
+There are **three CLI scripts** (one per protocol) plus the emulator:
 
 | Script | Protocol | Devices | Default Port |
 |--------|----------|---------|-------------|
-| `naim_control_rest.py` | HTTP REST API | Newer devices (Uniti series, Mu-so 2nd gen, etc.) | 15081 |
-| `naim_control_upnp.py` | UPnP/DLNA SOAP | All devices (playback, volume, media servers) | 8080 |
-| `naim_control_nstream.py` | n-Stream/BridgeCo | Legacy devices (input switching, preamp settings) | 15555 |
+| `naim_control_rest.py` | HTTP REST API + SSE | Newer devices (Uniti series, Mu-so 2nd gen) | 15081 |
+| `naim_control_upnp.py` | UPnP/DLNA SOAP | All devices (playback, volume) | 8080 |
+| `naim_control_nstream.py` | n-Stream/BridgeCo | Legacy devices (input switching, preamp) | 15555 |
+| `naim_emulator_legacy.py` | All legacy protocols | Emulates SuperUniti etc. for testing | 15555 / 8080 |
 
 ## Requirements
 
@@ -86,6 +88,43 @@ All output is printed as formatted JSON to stdout. Errors go to stderr.
 
 ```bash
 ./naim_control_rest.py --host 192.168.1.50 api-info
+```
+
+---
+
+### Real-Time Monitor (SSE)
+
+The device pushes state-change events in real time via **Server-Sent Events**
+on `GET /notify` — the same port (15081) as the REST API.  Each event carries
+the `ussi` of the resource that changed and only the fields that changed:
+
+```
+[14:32:01] nowplaying  (id=47)
+  transportState  Playing
+  seekPosition    90000
+```
+
+| Command | Options | Description |
+|---------|---------|-------------|
+| `monitor` | `[--ussi <filter>]` `[--raw]` | Stream real-time events from `/notify` |
+
+| Option | Description |
+|--------|-------------|
+| `--ussi <str>` | Only show events whose `ussi` contains this substring (e.g. `nowplaying`, `levels`) |
+| `--raw` | Print full JSON event instead of formatted output |
+
+```bash
+# Stream all events
+./naim_control_rest.py --host 192.168.1.50 monitor
+
+# Only nowplaying changes (transport state, track metadata)
+./naim_control_rest.py --host 192.168.1.50 monitor --ussi nowplaying
+
+# Only volume changes
+./naim_control_rest.py --host 192.168.1.50 monitor --ussi levels
+
+# Full JSON, all events
+./naim_control_rest.py --host 192.168.1.50 monitor --raw
 ```
 
 ---
@@ -1223,23 +1262,212 @@ naim-input max-vol-set --level 80
 ```
 Is your device a newer model (Uniti Atom/Star/Nova, Mu-so 2nd gen)?
 │
-├─ YES → Use naim_control_rest.py (port 15081)
-│        Full control of everything
+├─ YES → naim_control_rest.py (port 15081)
+│        Full control: playback, volume, inputs, alarms, firmware, library
+│        Real-time events: monitor --ussi nowplaying
 │
-└─ NO (Legacy device: SuperUniti, NDS, NDX, UnitiQute, etc.)
+└─ NO (Legacy: SuperUniti, NDS, NDX, UnitiQute, etc.)
    │
-   ├─ For playback control (play/pause/stop)?
-   │  └─ Use naim_control_upnp.py (port 8080)
+   ├─ Playback control (play/pause/stop/next/prev)?
+   │  └─ naim_control_upnp.py (port 8080)
    │
-   ├─ For volume control?
-   │  └─ Use naim_control_upnp.py OR naim_control_nstream.py
+   ├─ Volume control?
+   │  └─ naim_control_upnp.py  OR  naim_control_nstream.py
    │
-   ├─ For input switching?
-   │  └─ Use naim_control_nstream.py (port 15555)
+   ├─ Input switching?
+   │  └─ naim_control_nstream.py (port 15555)  ← only option
    │
-   ├─ For browsing UPnP Media Servers?
-   │  └─ Use naim_control_upnp.py (media-servers, server-browse)
+   ├─ Browse UPnP media servers / NAS?
+   │  └─ naim_control_upnp.py (media-servers, server-browse, server-play)
    │
-   └─ For device settings (max volume, room name, Bluetooth)?
-      └─ Use naim_control_nstream.py (port 15555)
+   └─ Device settings (max volume, room name, Bluetooth)?
+      └─ naim_control_nstream.py (port 15555)
+
+No hardware? → naim_emulator_legacy.py — emulates a legacy device locally
+```
+
+---
+
+# Legacy Device Emulator (`naim_emulator_legacy.py`)
+
+`naim_emulator_legacy.py` is a software replica of a legacy Naim device
+(SuperUniti by default).  It implements the same three server-side services
+as the real hardware so the CLI clients work against it unmodified.
+
+**Why it exists:** legacy devices like the SuperUniti use a proprietary
+BridgeCo RTOS that is hard to inspect.  The emulator lets you test all three
+protocol clients, verify response parsing, and develop automation scripts
+without needing the physical device powered on.
+
+## Architecture note
+
+The emulator mirrors the inferred server-side architecture of real legacy
+devices:
+
+- **One `DeviceState` object** is the single owner of all device state —
+  just as the real device uses one NVM command interpreter with one state store.
+- **Two protocol adapters** (`NStreamServer`, `UPnPServer`) share that state,
+  so a volume change via UPnP is immediately reflected in n-Stream `GETPREAMP`.
+- **SSDP** broadcasts `ssdp:alive` so the Naim app discovers the emulator
+  automatically on the same LAN.
+
+## Starting the emulator
+
+```bash
+# Default — SuperUniti profile, all services on standard ports
+./naim_emulator_legacy.py --model superuniti
+
+# Custom port (useful if real device is also on the same machine)
+./naim_emulator_legacy.py --model superuniti --nstream-port 15556 --upnp-port 8081
+
+# Load a custom profile from a JSON file
+./naim_emulator_legacy.py --profile device_profiles/superuniti.json
+
+# Disable UPnP / SSDP (n-Stream only)
+./naim_emulator_legacy.py --model superuniti --no-upnp --no-ssdp
+```
+
+## Logging modes
+
+| Flag | What is logged |
+|------|----------------|
+| *(none)* | CONNECT / CLOSE events, status panel at start/end |
+| `--verbose` | All parsed NVM commands and responses; status panel after each session |
+| `--debug` | Everything in verbose + raw hex bytes sent and received (very noisy) |
+
+Example verbose output:
+
+```
+[14:12:01.042] [nStream] #a270 CONNECT  192.168.1.10
+[14:12:01.043] [nStream] #a270 >> RequestAPIVersion OK (id=1)
+[14:12:01.044] [nStream] #a270 >> GetBridgeCoAppVersions (app=1000) (id=2)
+[14:12:01.044] [nStream] #a270 NVM<< '*NVM PRODUCT'
+[14:12:01.044] [nStream] #a270 NVM>> '#NVM PRODUCT SUPER_UNITI'
+[14:12:01.044] [nStream] #a270 NVM<< '*NVM VERSION'
+[14:12:01.044] [nStream] #a270 NVM>> '#NVM VERSION 3.21.000 14171'
+...
+[14:12:04.051] [nStream] #a270 CLOSE    192.168.1.10
+┌─ #a270 post-session ──────────────────────────────┐
+│  Input    : UPNP  "UPnP"                          │
+│  Volume   : 30                                    │
+│  Playback : STOPPED   Repeat: OFF   Shuffle: OFF  │
+│  Power    : On   Auto-standby: 20 min             │
+│  Room     : Living Room                           │
+│  BT       : INACTIVE   Name: "SuperUniti"         │
+└───────────────────────────────────────────────────┘
+```
+
+## State persistence
+
+The emulator saves all mutable device state after every change so it resumes
+where it left off on restart.
+
+| Option | Description |
+|--------|-------------|
+| *(default)* | Save to `device_state/<model>_state.json` |
+| `--state-file <path>` | Custom path for the state file |
+| `--no-persist` | Disable saving — start from profile defaults each run |
+
+**What is persisted** (mutable, user-changeable state):
+
+- Current input, volume, mute, balance
+- Per-input names (after `input-rename`), enabled/disabled, trim
+- Max amplifier volume, max headphone volume
+- Standby state, auto-standby timeout
+- Room name, Bluetooth name and security settings
+- Playback transport state, repeat, shuffle
+
+**What is NOT persisted** (fixed hardware identity, always from profile):
+
+- Product code, firmware version, MAC address, serial number
+- Input order and IDs
+- Unsupported NVM command list
+
+## Device profiles
+
+Profiles are JSON files in `device_profiles/`.  The built-in `superuniti`
+profile is also embedded in the script so `--model superuniti` works without
+any extra files.
+
+### Profile schema
+
+```json
+{
+  "model":            "SuperUniti",
+  "product_code":     "SUPER_UNITI",
+  "firmware_version": "3.21.000 14171",
+  "mac":              ["00", "1A", "D0", "AB", "CD", "EF"],
+  "room_name":        "Living Room",
+  "friendly_name":    "Naim SuperUniti",
+  "serial":           "EMU000001",
+  "initial_volume":   30,
+  "max_amp_volume":   100,
+  "max_head_volume":  75,
+  "initial_input":    "UPNP",
+  "auto_standby_period": 20,
+  "unsupported_nvm": ["GETILLUM", "SETILLUM", "GETAUTOSTANDBYPERIOD",
+                      "SETAUTOSTANDBYPERIOD", "GETSERIALNUM"],
+  "inputs": [
+    {"id": "FM",       "name": "FM",        "enabled": false},
+    {"id": "UPNP",     "name": "UPnP",      "enabled": true},
+    {"id": "DIGITAL1", "name": "Digital 1", "enabled": true},
+    ...
+  ]
+}
+```
+
+Key fields:
+
+| Field | Description |
+|-------|-------------|
+| `firmware_version` | Must be ≥ `"3.0.000"` for the Naim app to accept it |
+| `unsupported_nvm` | NVM commands that return `ERROR: CMD 4` on this model |
+| `inputs[].enabled` | Whether the input appears in the active input list |
+| `initial_input` | Input selected at startup (overridden by state file after first run) |
+
+### Adding a new model
+
+1. Copy `device_profiles/superuniti.json` to e.g. `device_profiles/ndx.json`
+2. Update `model`, `product_code`, `firmware_version`, and the `inputs` list
+3. Add device-specific `unsupported_nvm` entries (check `PROTOCOLS_DETAILED.md`)
+4. Run: `./naim_emulator_legacy.py --profile device_profiles/ndx.json`
+
+## NVM commands supported
+
+The emulator handles the full set of NVM commands sent by the Naim app during
+startup and normal operation:
+
+| Category | Commands |
+|----------|----------|
+| **Startup** | `PRODUCT`, `VERSION`, `GETSEDMPTYPE`, `GETSEDMPCAPS`, `GETINITIALINFO`, `SETUNSOLICITED`, `GETCHGTRACKERS` |
+| **Inputs** | `GETINPUTBLK`, `GETINPUT`, `SETINPUT`, `INPUT+`, `INPUT-`, `SETINPUTENABLED`, `GETINPUTENABLED`, `SETINPUTNAME`, `GETINPUTNAME`, `GETINPUTTRIM`, `SETINPUTTRIM` |
+| **Volume / preamp** | `VOL+`, `VOL-`, `SETRVOL`, `SETMUTE`, `GETPREAMP`, `GETAMPMAXVOL`, `SETAMPMAXVOL`, `GETHEADMAXVOL`, `GETBAL`, `SETBAL` |
+| **Device info** | `GETMAC`, `GETROOMNAME`, `SETROOMNAME`, `GETLANG`, `GETBSLVER`, `GETSEDMPTYPE`, `GETSEDMPCAPS` |
+| **Power** | `SETSTANDBY`, `GETSTANDBYSTATUS`, `GETILLUM`\*, `SETILLUM`\*, `GETAUTOSTANDBYPERIOD`\* |
+| **Playback** | `PLAY`, `STOP`, `PAUSE`, `NEXTTRACK`, `PREVTRACK`, `FF`, `FR`, `REPEAT`, `RANDOM` |
+| **Bluetooth** | `BTSTATUS`, `BTPAIR`, `BTDROPLINK`, `BTRECONNECT`, `GETBTNAME`, `SETBTNAME`, `GETBTSECURITY`, `SETBTSECURITY`, `GETBTAUTORECONNECT`, `SETBTAUTORECONNECT`, `GETBTAUTOPLAY`, `SETBTAUTOPLAY` |
+| **Alarms/radio** | `GETIRADIOHIDDENROWS`, `GETBLASTCAPS`, `GETDATETIME`, `ALARMSTATE` |
+| **BC layer** | `RequestAPIVersion`, `GetBridgeCoAppVersions`, `SetHeartbeatTimeout`, `Ping` |
+
+\* Returns `ERROR: CMD 4` for SuperUniti (listed in `unsupported_nvm`); supported
+on models that include these in their profile.
+
+## Testing workflow
+
+```bash
+# Terminal 1 — start emulator
+./naim_emulator_legacy.py --model superuniti --verbose
+
+# Terminal 2 — run CLI clients against the emulator
+./naim_control_nstream.py --host 127.0.0.1 inputs
+./naim_control_nstream.py --host 127.0.0.1 set-input --input DIGITAL1
+./naim_control_nstream.py --host 127.0.0.1 input-rename --input DIGITAL1 --name "TV Audio"
+./naim_control_nstream.py --host 127.0.0.1 vol-set --level 55
+./naim_control_nstream.py --host 127.0.0.1 preamp
+./naim_control_upnp.py    --host 127.0.0.1 volume-get
+./naim_control_upnp.py    --host 127.0.0.1 transport-info
+
+# Stop and restart emulator — state is reloaded from device_state/
+./naim_emulator_legacy.py --model superuniti --verbose
+# Status panel shows: Input=DIGITAL1 "TV Audio", Volume=55
 ```

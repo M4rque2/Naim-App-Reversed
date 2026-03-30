@@ -1,8 +1,9 @@
 # naim-streamer-control
 
-An unofficial Python command-line tool for controlling Naim Audio streaming
-devices over your local network, reverse-engineered from the official Naim
-Android application.
+Unofficial Python tools for controlling Naim Audio streaming devices over your
+local network, reverse-engineered from the official Naim Android application.
+Includes CLI clients for all three device protocols **and a server-side emulator**
+for testing without real hardware.
 
 ---
 
@@ -24,122 +25,170 @@ Android application.
 
 ---
 
-## What This Is
-
-Naim Audio devices (Uniti series, Mu-so, NAC-N, ND series, etc.) expose an
-undocumented HTTP REST API on port `15081` of your local network. This API is
-what the official Naim app uses to control the device.
-
-This project reverse-engineered that API from the Naim Android APK and
-reimplements it as a single-file Python CLI tool with no external dependencies,
-allowing you to control your Naim streamer from any terminal, script, or
-automation system.
-
 ## What's Included
+
+### CLI Clients
+
+| File | Protocol | Target Devices | Port |
+|------|----------|----------------|------|
+| `naim_control_rest.py` | HTTP REST API + SSE | Newer devices (Uniti series, Mu-so 2nd gen) | 15081 |
+| `naim_control_upnp.py` | UPnP/DLNA SOAP | All devices (playback, volume, media browsing) | 8080 |
+| `naim_control_nstream.py` | n-Stream/BridgeCo | Legacy devices (input switching, preamp, BT) | 15555 |
+
+### Emulator
 
 | File | Description |
 |------|-------------|
-| `naim_control.py` | The CLI tool — all commands in one file |
-| `PROTOCOL.md` | Full technical protocol analysis (HTTP, JSON models, enums) |
-| `USAGE.md` | Complete usage guide with examples for every command |
+| `naim_emulator_legacy.py` | Server-side emulator for legacy Naim devices (SuperUniti etc.) |
+| `device_profiles/superuniti.json` | SuperUniti device configuration (18 inputs) |
+| `device_state/<model>_state.json` | Auto-saved mutable state (created at runtime) |
 
-## Requirements
+### Documentation
 
-- Python 3.6 or later (standard library only — no `pip install` needed)
-- A Naim streaming device on your local network
-- The device's IP address
+| File | Description |
+|------|-------------|
+| `PROTOCOLS_DETAILED.md` | Full technical analysis — all three protocols, JSON schemas, NVM command reference |
+| `PROTOCOL_OVERVIEW.md` | High-level protocol summary |
+| `USAGE.md` | Complete CLI usage guide and emulator reference |
+
+---
+
+## Protocol Architecture
+
+Naim devices use **three distinct protocols** depending on the device generation:
+
+| Device generation | Protocols available |
+|-------------------|---------------------|
+| **Legacy** (SuperUniti, NDS, NDX, UnitiQute, NAC-N 272) | n-Stream :15555 + UPnP :8080 |
+| **Modern** (Uniti Atom/Star/Nova, Mu-so 2nd gen) | REST :15081 + UPnP :8080 |
+
+**Inferred server-side architecture on legacy devices:**
+
+```
+  TCP :15555  n-Stream ──┐
+  HTTP :8080  UPnP     ──┤──► NVM Command Queue ──► Device State ──► Hardware (DSP)
+                          │       (serialised)         (single owner)
+                          └─ SETUNSOLICITED broadcast to all connected n-Stream clients
+```
+
+Both protocol adapters share a single command queue and a single state store —
+which is why a volume change via UPnP is immediately visible via n-Stream
+`GETPREAMP`, and vice versa.
+
+See `PROTOCOLS_DETAILED.md` for the full technical analysis.
+
+---
 
 ## Quick Start
 
+### Legacy devices (SuperUniti, NDS, NDX…)
+
 ```bash
+# Input switching — n-Stream protocol (port 15555)
+./naim_control_nstream.py --host 192.168.1.48 inputs
+./naim_control_nstream.py --host 192.168.1.48 set-input --input DIGITAL2
+./naim_control_nstream.py --host 192.168.1.48 vol-set --level 40
+
+# Playback and volume — UPnP (port 8080)
+./naim_control_upnp.py --host 192.168.1.48 play
+./naim_control_upnp.py --host 192.168.1.48 volume-set --level 40
+```
+
+### Newer devices (Uniti Atom, Nova, Mu-so 2nd gen…)
+
+```bash
+# Discover devices on the network
+./naim_control_rest.py discover
+
 # Check what is currently playing
-python3 naim_control.py --host 192.168.1.50 nowplaying
+./naim_control_rest.py --host 192.168.1.50 nowplaying
 
-# Play / pause / skip
-python3 naim_control.py --host 192.168.1.50 play
-python3 naim_control.py --host 192.168.1.50 pause
-python3 naim_control.py --host 192.168.1.50 next
+# Play / pause / volume
+./naim_control_rest.py --host 192.168.1.50 play
+./naim_control_rest.py --host 192.168.1.50 volume-set --level 40
+./naim_control_rest.py --host 192.168.1.50 input-select --ussi inputs/tidal
 
-# Set volume to 40
-python3 naim_control.py --host 192.168.1.50 volume-set --level 40
-
-# Switch input to Tidal
-python3 naim_control.py --host 192.168.1.50 input-select --ussi inputs/tidal
-
-# List all available inputs
-python3 naim_control.py --host 192.168.1.50 inputs-list
+# Real-time state stream via SSE (GET /notify)
+./naim_control_rest.py --host 192.168.1.50 monitor
+./naim_control_rest.py --host 192.168.1.50 monitor --ussi nowplaying
 ```
 
-## Supported Commands
+---
 
-The tool covers every API endpoint found in the decompiled app:
+## Device Emulator
 
-| Category | Commands |
-|----------|----------|
-| Playback | `play` `pause` `stop` `resume` `next` `prev` `toggle` `seek` `repeat` `shuffle` `nowplaying` |
-| Volume | `volume-set` `mute` `unmute` `balance` `volume-mode` `levels-get` `levels-room` `levels-group` `levels-bluetooth` |
-| Inputs | `inputs-list` `input-select` `input-play` `input-resume` `input-rename` `input-disable` `input-trim` `input-sensitivity` `input-unity-gain` |
-| Outputs | `outputs-list` `output-enabled` `output-max-volume` `loudness` `loudness-enabled` `room-position` `dsd-mode` |
-| Streaming | Qobuz login/logout/quality · Tidal OAuth login/logout · Spotify bitrate/gain/presets |
-| Radio | iRadio browse/play · FM/DAB scan/step · User station add/delete |
-| Bluetooth | Pair · drop · forget · auto-pair |
-| Play Queue | Get · clear · move · set-current |
-| Favourites | List · play · delete · preset assign/move |
-| Multiroom | Get state · add/remove from group |
-| CD | Info · eject · play · insert-action |
-| Alarms | List · create · enable/disable · delete |
-| Sleep Timer | Start · cancel |
-| Network | Get config · WiFi setup · DHCP/static IP · hostname |
-| System | Info · reboot · keep-awake · usage · date/time |
-| Firmware | Status · check for updates · start update |
-| Library | Browse tracks/albums/artists · play · queue |
-
-See [`USAGE.md`](USAGE.md) for the full reference with options and examples.
-
-## Protocol Overview
-
-The API is a plain HTTP REST interface on port `15081`. There is no
-authentication — any device on the same network can send commands.
-
-- **Transport:** HTTP/1.1, port `15081`, no HTTPS
-- **Format:** JSON (all requests and responses)
-- **Actions:** `GET /endpoint?cmd=<action>` — e.g. `?cmd=play`
-- **Settings:** `PUT /endpoint?key=<value>` — e.g. `?volume=40`
-- **Real-time:** Server-Sent Events (SSE) for push state updates
-
-See [`PROTOCOL.md`](PROTOCOL.md) for the complete technical analysis including
-all JSON schemas, enumeration values, USSI addressing, and SSE documentation.
-
-## Shell Alias
-
-To avoid typing `--host` on every command:
+`naim_emulator_legacy.py` emulates a legacy Naim device so you can develop and
+test client tools without real hardware.
 
 ```bash
-# Add to ~/.bashrc or ~/.zshrc
-alias naim='python3 /path/to/naim_control.py --host 192.168.1.50'
+# Start the emulator (SuperUniti profile, default ports)
+./naim_emulator_legacy.py --model superuniti
+
+# Verbose — shows every parsed command and response
+./naim_emulator_legacy.py --model superuniti --verbose
+
+# Debug — raw bytes + full XML (for wire-protocol debugging)
+./naim_emulator_legacy.py --model superuniti --debug
 ```
 
-Then:
+The emulator listens on the same ports as a real device:
+
+| Service | Port |
+|---------|------|
+| n-Stream/BridgeCo | TCP 15555 |
+| UPnP/DLNA | HTTP 8080 |
+| SSDP discovery | UDP 239.255.255.250:1900 |
+
+**State persistence:** volume, current input, per-input names, Bluetooth
+settings and all other mutable state are auto-saved to
+`device_state/superuniti_state.json` after every change and reloaded on restart.
+Use `--no-persist` to start fresh each run, or `--state-file <path>` to
+specify a custom save path.
+
+**Status display:** shown at startup, after each client session (in verbose
+mode), and on shutdown:
+
+```
+┌─ SuperUniti ──────────────────────────────────────┐
+│  Input    : DIGITAL2  "TV Audio"                  │
+│  Volume   : 40                                    │
+│  Playback : STOPPED   Repeat: OFF   Shuffle: OFF  │
+│  Power    : On   Auto-standby: 20 min             │
+│  Room     : Living Room                           │
+│  BT       : INACTIVE   Name: "SuperUniti"         │
+└───────────────────────────────────────────────────┘
+```
+
+Test against the emulator with the same CLI clients:
+
 ```bash
-naim nowplaying
-naim volume-set --level 30
-naim input-select --ussi inputs/spotify
+./naim_control_nstream.py --host 127.0.0.1 inputs
+./naim_control_nstream.py --host 127.0.0.1 set-input --input DIGITAL2
+./naim_control_nstream.py --host 127.0.0.1 vol-set --level 40
+./naim_control_upnp.py    --host 127.0.0.1 volume-get
+./naim_control_upnp.py    --host 127.0.0.1 transport-info
 ```
 
-## Tested Devices
+See `USAGE.md` for the full emulator reference including device profile
+customisation and adding new models.
 
-This tool was developed through static analysis of the Naim Android app only.
-It has **not** been systematically tested against real hardware. Devices that
-may be compatible include:
+---
 
-- Naim Uniti series (Atom, Star, Nova, Core)
-- Naim Mu-so and Mu-so Qb series
-- Naim ND series network players
-- Naim NAC-N series preamplifiers
+## Tested Hardware
 
-Not every command applies to every model. Commands for hardware your device
-does not have (e.g. CD commands on a device without a CD drive) will return
-HTTP 404 and the tool will exit with an error message.
+| Device | IP | Protocols verified |
+|--------|----|--------------------|
+| Naim SuperUniti | 192.168.1.48 | n-Stream ✅  UPnP ✅ |
+| Naim Atom | — (not tested locally) | REST API modelled from naim-atom-home-assistant reference |
+
+---
+
+## Requirements
+
+- Python 3.10 or later (standard library only — no `pip install` needed)
+- A Naim device on the local network, or the emulator for offline testing
+
+---
 
 ## Disclaimer
 
@@ -153,10 +202,7 @@ the original application is included in this repository.
 
 **THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR CONTRIBUTORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
-WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.**
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.**
 
 Use at your own risk.
 

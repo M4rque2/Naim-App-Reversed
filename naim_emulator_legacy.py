@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Naim Device Emulator
-Emulates legacy Naim audio devices for testing client tools without real hardware.
+Naim Legacy Device Emulator
+============================
+Emulates legacy Naim audio devices (SuperUniti, NDS, NDX, UnitiQute, NAC-N 272…)
+for testing client tools without real hardware.
 
 Implements:
   - n-Stream/BridgeCo protocol  (TCP port 15555)
@@ -9,14 +11,98 @@ Implements:
   - SSDP responder              (UDP 239.255.255.250:1900)
 
 Usage:
-  ./naim_emulator.py --model superuniti
-  ./naim_emulator.py --model superuniti --verbose
-  ./naim_emulator.py --model superuniti --debug      # raw-bytes + full XML dump
-  ./naim_emulator.py --profile device_profiles/superuniti.json
+  ./naim_emulator_legacy.py --model superuniti
+  ./naim_emulator_legacy.py --model superuniti --verbose
+  ./naim_emulator_legacy.py --model superuniti --debug      # raw-bytes + full XML dump
+  ./naim_emulator_legacy.py --profile device_profiles/superuniti.json
 
 Then test with the CLI clients:
   ./naim_control_nstream.py --host 127.0.0.1 inputs
   ./naim_control_upnp.py    --host 127.0.0.1 info
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+LEGACY DEVICE SERVER-SIDE ARCHITECTURE  (inferred from reverse engineering)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Hardware platform
+─────────────────
+Legacy Naim streamers (SuperUniti, NDS, NDX etc.) are built on the BridgeCo
+"Sophies" platform — a proprietary RTOS running on an ARM application CPU
+alongside a dedicated DSP co-processor.  The hardware type string "SEDMP2D"
+(*NVM GETSEDMPTYPE) confirms the "Streaming Engine, Digital Media Platform 2nd
+generation".  The ARM runs all network protocol code; the DSP handles audio
+decode, DAC, and hardware I/O (volume relay, input MUX).
+
+Two-processor split  (ARM ↔ DSP)
+─────────────────────────────────
+The ARM and DSP communicate via a low-level bus (SPI/UART/shared memory —
+exact mechanism not confirmed).  NVM commands like SETRVOL and SETINPUT
+ultimately translate to register writes or control messages sent by the ARM
+to the DSP.  This split is why there is a latency between issuing a command
+and the hardware responding.
+
+Single-process, two protocol frontends
+────────────────────────────────────────
+Because the BridgeCo RTOS is resource-constrained (~256 MB RAM, ~500 MHz ARM)
+and must keep device state consistent across all network clients, the most
+likely implementation is a single application process that owns all device
+state and multiplexes two network-facing protocol adapters:
+
+    TCP :15555  n-Stream/BridgeCo ──┐
+                (BC layer + NVM      │
+                 tunnel in XML/B64)  ├──► NVM Command Queue ──► Device State
+                                     │        (FIFO,              Manager
+    HTTP :8080  UPnP/DLNA ───────────┘        serialised)      (volume, input,
+                (SOAP/XML)                          │             BT, presets…)
+                                                    │                  │
+                                            Hardware abstraction       │
+                                            layer → DSP co-proc        │
+                                                                        │
+                                   ◄────────────────────────────────────┘
+                                   SETUNSOLICITED broadcast:
+                                   state-change events pushed to ALL
+                                   currently connected n-Stream clients
+
+NVM Command Queue (serialised)
+────────────────────────────────
+Both protocol adapters translate their respective wire formats into NVM
+commands and push them onto a single FIFO queue.  A single consumer thread
+processes one command at a time and writes the result back to the originating
+socket.  Evidence for this design:
+
+  • The Naim Android app's TunnelQueue (client side) serialises commands and
+    will not send the next until the previous reply arrives or the 20 s timeout
+    elapses.  This mirrors the server-side design: the server also processes one
+    command at a time, so the client queue is a natural complement.
+
+  • "NVM" stands for Naim Virtual Machine — a simple command interpreter, not
+    a concurrent execution engine.  Interpreters are inherently sequential.
+
+  • UPnP SetVolume (SOAP) and *NVM SETRVOL produce the same observable effect.
+    They are almost certainly both enqueued as the same internal command type.
+
+SETUNSOLICITED — pub/sub event broadcasting
+─────────────────────────────────────────────
+After a client sends *NVM SETUNSOLICITED ON, the device pushes TunnelFromHost
+events whenever state changes — even if triggered by a different client or a
+physical front-panel button.  This reveals a publish/subscribe layer sitting
+above the command queue:
+
+    Device State Manager ──► Event broadcaster ──► all SETUNSOLICITED clients
+                                                    (fan-out, one per socket)
+
+How this emulator models the above
+────────────────────────────────────
+  • DeviceState             = the single canonical state store (shared across
+                              both protocol servers via one in-process object —
+                              no IPC required because we are one process)
+  • handle_nvm_command()    = the NVM command interpreter (queue consumer)
+  • NStreamServer/Handler   = the n-Stream protocol adapter (queue producer)
+  • UPnPServer/Handler      = the UPnP protocol adapter (queue producer)
+  • Both servers share one DeviceState instance, mirroring the real device's
+    single state owner
+  • (Unsolicited push events are not yet implemented in this emulator)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 import argparse
@@ -85,6 +171,18 @@ def _get_local_ip() -> str:
         return "127.0.0.1"
 
 
+def _print_status(state: "DeviceState", label: str = "Device status"):
+    """Print a formatted status panel showing the current device state."""
+    lines = state.status_lines()
+    width = max(len(l) for l in lines) + 2
+    bar   = "─" * width
+    print(f"┌─ {label} {bar[len(label)+3:]}┐")
+    for l in lines:
+        pad = width - len(l)
+        print(f"│{l}{' ' * pad}│")
+    print(f"└{bar}┘")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Built-in device profiles (also loadable from device_profiles/*.json)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -138,47 +236,45 @@ BUILTIN_PROFILES = {
 # ─────────────────────────────────────────────────────────────────────────────
 # Device State
 # ─────────────────────────────────────────────────────────────────────────────
+# On the real device this is the single authoritative state store owned by the
+# ARM application process.  All protocol adapters (n-Stream, UPnP) read and
+# write through it — never independently.  In the firmware this is likely a
+# set of global variables or a singleton struct protected by a mutex or
+# processed exclusively on one thread (the NVM command consumer thread).
+# ─────────────────────────────────────────────────────────────────────────────
 
 class DeviceState:
-    """Thread-safe in-memory state for the emulated device."""
+    """
+    Thread-safe in-memory state for the emulated device.
 
-    def __init__(self, profile):
-        self._lock = threading.Lock()
+    Mutable state (volume, input, names, etc.) is auto-saved to a JSON file
+    whenever it changes so the emulator picks up where it left off on restart.
+    Fixed profile data (firmware version, MAC, input order) is never overwritten
+    by the save file — it always comes from the device profile.
 
+    State file schema  (only persisted fields, NOT profile config):
+        current_input, volume, muted, balance, max_amp_volume, max_head_volume,
+        standby, auto_standby_mins, illumination, room_name,
+        bt_name, bt_security, bt_auto_reconnect, bt_auto_play,
+        transport_state, repeat, random_mode,
+        inputs: { id: {name, enabled, trim} }
+    """
+
+    def __init__(self, profile, save_path: Path | None = None):
+        self._lock      = threading.RLock()   # RLock: reentrant — _auto_save() calls to_dict() while lock is held
+        self._save_path = save_path   # None → no persistence
+
+        # ── Fixed identity (from profile, never overwritten by save file) ──
         self.product_code       = profile["product_code"]
         self.firmware_version   = profile.get("firmware_version", "1.0.0 0")
         self.mac                = profile.get("mac", ["00", "11", "22", "33", "44", "55"])
-        self.room_name          = profile.get("room_name", "Emulated Naim")
         self.serial             = profile.get("serial", "EMU000001")
         self.friendly_name      = profile.get("friendly_name", profile.get("model", "Naim"))
-
-        self.volume             = profile.get("initial_volume", 30)
-        self.muted              = False
-        self.balance            = 0
-        self.max_amp_volume     = profile.get("max_amp_volume", 100)
-        self.max_head_volume    = profile.get("max_head_volume", 75)
-        self.standby            = False
-        self.auto_standby_mins  = profile.get("auto_standby_period", 20)
-        self.illumination       = 3
-
-        # Bluetooth
-        self.bt_name            = profile.get("model", "Naim")
-        self.bt_status          = "INACTIVE"
-        self.bt_security        = "OPEN"
-        self.bt_auto_reconnect  = "OFF"
-        self.bt_auto_play       = "OFF"
-
-        # Playback
-        self.transport_state    = "STOPPED"
-        self.repeat             = "OFF"
-        self.random_mode        = "OFF"
-
-        # Commands that return error 4 on this device model
-        self.unsupported_nvm = set(
+        self.unsupported_nvm    = set(
             c.upper() for c in profile.get("unsupported_nvm", [])
         )
 
-        # Inputs: ordered list and lookup dict
+        # ── Input order is fixed by profile (cannot be reordered at runtime) ──
         self._input_order: list[str] = []
         self._inputs: dict[str, dict] = {}
         for inp in profile.get("inputs", []):
@@ -190,10 +286,128 @@ class DeviceState:
                 "trim":    int(inp.get("trim", 0)),
             }
 
-        self.current_input = profile.get(
+        # ── Mutable state (defaults from profile, overridden by save file) ──
+        self.volume             = profile.get("initial_volume", 30)
+        self.muted              = False
+        self.balance            = 0
+        self.max_amp_volume     = profile.get("max_amp_volume", 100)
+        self.max_head_volume    = profile.get("max_head_volume", 75)
+        self.standby            = False
+        self.auto_standby_mins  = profile.get("auto_standby_period", 20)
+        self.illumination       = 3
+        self.room_name          = profile.get("room_name", "Emulated Naim")
+
+        self.bt_name            = profile.get("model", "Naim")
+        self.bt_status          = "INACTIVE"
+        self.bt_security        = "OPEN"
+        self.bt_auto_reconnect  = "OFF"
+        self.bt_auto_play       = "OFF"
+
+        self.transport_state    = "STOPPED"
+        self.repeat             = "OFF"
+        self.random_mode        = "OFF"
+
+        self.current_input      = profile.get(
             "initial_input",
             self._input_order[0] if self._input_order else "UPNP"
         )
+
+    # ── Persistence ──────────────────────────────────────────────────────────
+
+    def to_dict(self) -> dict:
+        """Serialise all mutable state to a plain dict (for saving)."""
+        with self._lock:
+            return {
+                "_comment":         "Mutable device state — auto-saved by naim_emulator_legacy.py",
+                "current_input":    self.current_input,
+                "volume":           self.volume,
+                "muted":            self.muted,
+                "balance":          self.balance,
+                "max_amp_volume":   self.max_amp_volume,
+                "max_head_volume":  self.max_head_volume,
+                "standby":          self.standby,
+                "auto_standby_mins": self.auto_standby_mins,
+                "illumination":     self.illumination,
+                "room_name":        self.room_name,
+                "bt_name":          self.bt_name,
+                "bt_security":      self.bt_security,
+                "bt_auto_reconnect": self.bt_auto_reconnect,
+                "bt_auto_play":     self.bt_auto_play,
+                "transport_state":  self.transport_state,
+                "repeat":           self.repeat,
+                "random_mode":      self.random_mode,
+                "inputs": {
+                    iid: dict(v) for iid, v in self._inputs.items()
+                },
+            }
+
+    def apply_saved(self, data: dict):
+        """
+        Overwrite mutable state from a previously saved dict.
+        Only fields present in ``data`` are applied; missing keys keep their
+        profile defaults.  Input order is always preserved from the profile.
+        """
+        with self._lock:
+            for key in ("volume", "muted", "balance", "max_amp_volume",
+                        "max_head_volume", "standby", "auto_standby_mins",
+                        "illumination", "room_name", "bt_name", "bt_security",
+                        "bt_auto_reconnect", "bt_auto_play", "transport_state",
+                        "repeat", "random_mode"):
+                if key in data:
+                    setattr(self, key, data[key])
+
+            if "current_input" in data and data["current_input"] in self._inputs:
+                self.current_input = data["current_input"]
+
+            # Restore per-input mutable fields (name, enabled, trim)
+            for iid, saved in data.get("inputs", {}).items():
+                if iid in self._inputs:
+                    for field in ("name", "enabled", "trim"):
+                        if field in saved:
+                            self._inputs[iid][field] = saved[field]
+
+    def _auto_save(self):
+        """Write state to the save file (called after every mutation)."""
+        if self._save_path is None:
+            return
+        try:
+            self._save_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._save_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.to_dict(), indent=2))
+            tmp.replace(self._save_path)   # atomic on POSIX
+        except Exception as exc:
+            print(f"[state] WARNING: could not save state: {exc}")
+
+    # ── Status display ───────────────────────────────────────────────────────
+
+    def status_lines(self) -> list[str]:
+        """Return a list of human-readable status lines for the status panel."""
+        with self._lock:
+            inp_name = self._inputs.get(self.current_input, {}).get(
+                "name", self.current_input
+            )
+            inp_str = f"{self.current_input}  \"{inp_name}\""
+
+            vol_str = f"{self.volume}"
+            if self.muted:
+                vol_str += "  [MUTED]"
+            if self.balance != 0:
+                side = "R" if self.balance > 0 else "L"
+                vol_str += f"  Balance: {side}{abs(self.balance)}"
+
+            pwr_str = "STANDBY" if self.standby else "On"
+
+            lines = [
+                f"  Input    : {inp_str}",
+                f"  Volume   : {vol_str}",
+                f"  Playback : {self.transport_state}"
+                f"   Repeat: {self.repeat}   Shuffle: {self.random_mode}",
+                f"  Power    : {pwr_str}"
+                f"   Auto-standby: {self.auto_standby_mins} min",
+                f"  Room     : {self.room_name}",
+                f"  BT       : {self.bt_status}   Name: \"{self.bt_name}\"",
+            ]
+            return lines
 
     # ── Inputs ──────────────────────────────────────────────────────────────
 
@@ -210,6 +424,7 @@ class DeviceState:
         with self._lock:
             if input_id in self._inputs:
                 self.current_input = input_id
+                self._auto_save()
                 return True
             return False
 
@@ -225,6 +440,7 @@ class DeviceState:
                 idx = 0
             idx = (idx + direction) % len(enabled)
             self.current_input = enabled[idx]
+            self._auto_save()
             return self.current_input
 
     def set_input_enabled(self, input_id, enabled):
@@ -232,6 +448,7 @@ class DeviceState:
             if input_id not in self._inputs:
                 return False
             self._inputs[input_id]["enabled"] = enabled
+            self._auto_save()
             return True
 
     def get_input_enabled(self, input_id):
@@ -245,6 +462,7 @@ class DeviceState:
             if input_id not in self._inputs:
                 return False
             self._inputs[input_id]["name"] = name
+            self._auto_save()
             return True
 
     def get_input_name(self, input_id):
@@ -264,6 +482,7 @@ class DeviceState:
             if input_id not in self._inputs:
                 return False
             self._inputs[input_id]["trim"] = level
+            self._auto_save()
             return True
 
     # ── Volume / preamp ─────────────────────────────────────────────────────
@@ -271,24 +490,29 @@ class DeviceState:
     def volume_up(self):
         with self._lock:
             self.volume = min(self.max_amp_volume, self.volume + 1)
+            self._auto_save()
             return self.volume
 
     def volume_down(self):
         with self._lock:
             self.volume = max(0, self.volume - 1)
+            self._auto_save()
             return self.volume
 
     def set_volume(self, level):
         with self._lock:
             self.volume = max(0, min(100, level))
+            self._auto_save()
 
     def set_muted(self, muted):
         with self._lock:
             self.muted = muted
+            self._auto_save()
 
     def set_balance(self, level):
         with self._lock:
             self.balance = level
+            self._auto_save()
 
     def get_preamp_snapshot(self):
         with self._lock:
@@ -306,6 +530,7 @@ class DeviceState:
     def set_standby(self, on):
         with self._lock:
             self.standby = on
+            self._auto_save()
 
     def get_standby(self):
         with self._lock:
@@ -320,6 +545,7 @@ class DeviceState:
     def set_transport_state(self, state):
         with self._lock:
             self.transport_state = state
+            self._auto_save()
 
     def get_transport_state(self):
         with self._lock:
@@ -327,7 +553,29 @@ class DeviceState:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NVM Command Handler
+# NVM Command Handler  (the queue consumer / command interpreter)
+# ─────────────────────────────────────────────────────────────────────────────
+# On the real device this corresponds to the NVM interpreter loop that runs on
+# the ARM application CPU.  It sits at the heart of the architecture:
+#
+#   n-Stream adapter  ──► (enqueue NVM command)
+#                                  │
+#   UPnP adapter      ──► (enqueue NVM command)
+#                                  │
+#                                  ▼
+#                     handle_nvm_command()  ← this function
+#                         (one at a time)
+#                                  │
+#                                  ▼
+#                         DeviceState update
+#                                  │
+#                                  ▼
+#                         reply to requesting client
+#                         + optional SETUNSOLICITED broadcast
+#
+# "NVM" = Naim Virtual Machine.  The firmware is literally a small VM that
+# interprets ASCII commands.  Because it is sequential it is inherently
+# thread-safe with respect to device state — no two commands can run at once.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def handle_nvm_command(state: DeviceState, raw: str) -> list[str]:
@@ -766,7 +1014,38 @@ def handle_nvm_command(state: DeviceState, raw: str) -> list[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# n-Stream TCP Server
+# n-Stream TCP Server  (protocol adapter #1 — the queue producer)
+# ─────────────────────────────────────────────────────────────────────────────
+# On the real device this is one of two network-facing protocol adapters.  Its
+# job is to speak the BridgeCo wire protocol to external clients and translate
+# it into NVM commands that are forwarded to the central command queue.
+#
+# Wire-protocol layers (inferred from decompiled Naim app):
+#
+#   ┌──────────────────────────────────────────────────────────┐
+#   │  Application  *NVM SETINPUT DIGITAL2\r  (ASCII command)  │
+#   ├──────────────────────────────────────────────────────────┤
+#   │  Tunnel layer  <TunnelToHost> base64(NVM command)        │
+#   ├──────────────────────────────────────────────────────────┤
+#   │  BC (BridgeCo) layer  <command><name>…                   │
+#   │    session setup: RequestAPIVersion, SetHeartbeatTimeout  │
+#   ├──────────────────────────────────────────────────────────┤
+#   │  TCP socket  :15555  (raw stream, no framing)            │
+#   └──────────────────────────────────────────────────────────┘
+#
+# Connection initialisation sequence (mandatory, from decompiled BCManager.java):
+#   1. Client sends RequestAPIVersion  → server replies with OK
+#   2. Server sends GetBridgeCoAppVersions  → server replies with version info
+#   3. Client sends SetHeartbeatTimeout(10s) → server replies OK
+#      (BC start sequence complete — TunnelQueue is now active)
+#   4. Client sends *NVM SETUNSOLICITED ON via TunnelToHost
+#   5. Normal NVM commands flow via TunnelToHost / TunnelFromHost
+#   6. Server pings every 5 s with Ping command (client must reply)
+#
+# Multiple simultaneous clients are accepted (ThreadingTCPServer), which
+# matches the real device behaviour — the Naim app and a second controller
+# can both be connected.  Each client gets its own BC session but all share
+# the same DeviceState (single canonical state, as on the real device).
 # ─────────────────────────────────────────────────────────────────────────────
 
 class NStreamHandler(socketserver.BaseRequestHandler):
@@ -794,6 +1073,9 @@ class NStreamHandler(socketserver.BaseRequestHandler):
                   f"(buf remaining: {len(self._buf)} bytes)")
             if self._debug and self._buf:
                 print(_hexdump(self._buf, f"[{_ts()}] [nStream] #{self._conn_id:04x} BUF_LEFT "))
+            # Show current device state after each session so changes are visible
+            if self._verbose:
+                _print_status(self._state, f"#{self._conn_id:04x} post-session")
 
     def _run(self):
         while True:
@@ -1028,7 +1310,27 @@ class NStreamServer(socketserver.ThreadingTCPServer):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UPnP / DLNA HTTP Server
+# UPnP / DLNA HTTP Server  (protocol adapter #2 — the queue producer)
+# ─────────────────────────────────────────────────────────────────────────────
+# On the real device this is the second network-facing protocol adapter.  It
+# speaks standard UPnP/DLNA to external clients (media players, control points,
+# the Naim app's UPnP stack) and internally routes commands to the same NVM
+# command queue as the n-Stream adapter.
+#
+# Relationship between the two adapters on the real device:
+#
+#   UPnP AVTransport Play      →  *NVM PLAY\r
+#   UPnP RenderingControl      →  *NVM SETRVOL N\r  /  *NVM SETMUTE ON\r
+#   UPnP SetAVTransportURI     →  *NVM SETINPUT <id>\r  (or stream URI)
+#
+# The UPnP server on legacy devices does NOT expose ContentDirectory (no input
+# browsing) — that is intentional; input switching on these devices is only
+# available via n-Stream (*NVM SETINPUT).  Confirmed on SuperUniti fw 2.0.11.
+#
+# SSDP (UDP :1900) runs alongside this HTTP server so that control points can
+# discover the device on the LAN.  On the real device SSDP is almost certainly
+# part of the same UPnP daemon (e.g. a libupnp/miniupnp derivative), not a
+# separate process.  Here we implement it as a standalone thread for simplicity.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _SUPPORTED_PROTOCOLS = ",".join([
@@ -1587,6 +1889,8 @@ Examples:
   %(prog)s --model superuniti --verbose
   %(prog)s --profile device_profiles/superuniti.json
   %(prog)s --model superuniti --nstream-port 15555 --upnp-port 8080
+  %(prog)s --model superuniti --state-file /tmp/superuniti.json   # custom state path
+  %(prog)s --model superuniti --no-persist                        # run without saving state
 
 Then test with:
   ./naim_control_nstream.py --host 127.0.0.1 inputs
@@ -1636,6 +1940,19 @@ Then test with:
         help="Disable the SSDP responder (device won't be auto-discoverable)",
     )
     parser.add_argument(
+        "--state-file",
+        metavar="FILE",
+        default=None,
+        help="Path to persist mutable device state (JSON).  "
+             "Defaults to device_state/<model>_state.json.  "
+             "State is auto-saved on every change and reloaded on restart.",
+    )
+    parser.add_argument(
+        "--no-persist",
+        action="store_true",
+        help="Disable state persistence (start fresh each run, no file written)",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Log all protocol messages (parsed commands and responses)",
@@ -1652,11 +1969,35 @@ Then test with:
     if args.debug:
         args.verbose = True
 
-    profile = load_profile(args.model, args.profile)
-    state   = DeviceState(profile)
-
+    profile    = load_profile(args.model, args.profile)
     model_name = profile.get("model", profile.get("product_code", "Unknown"))
-    local_ip   = _get_local_ip()
+
+    # ── Resolve state file path ──────────────────────────────────────────────
+    state_path: Path | None = None
+    if not args.no_persist:
+        if args.state_file:
+            state_path = Path(args.state_file)
+        else:
+            script_dir = Path(__file__).parent
+            slug = model_name.lower().replace(" ", "_").replace("-", "_")
+            state_path = script_dir / "device_state" / f"{slug}_state.json"
+
+    # ── Build device state (apply saved state if file exists) ───────────────
+    state = DeviceState(profile, save_path=state_path)
+
+    if state_path and state_path.exists():
+        try:
+            saved = json.loads(state_path.read_text())
+            state.apply_saved(saved)
+            print(f"  State    : loaded from {state_path}")
+        except Exception as exc:
+            print(f"  State    : WARNING — could not load {state_path}: {exc}")
+    elif state_path:
+        print(f"  State    : will save to {state_path}  (no existing file)")
+    else:
+        print(f"  State    : persistence disabled (--no-persist)")
+
+    local_ip = _get_local_ip()
 
     print(f"Naim Emulator — {model_name}")
     print(f"  n-Stream : {args.bind}:{args.nstream_port}  (local IP: {local_ip})")
@@ -1685,18 +2026,20 @@ Then test with:
         print(f"  SSDP     : disabled")
 
     print(f"  Inputs   : {len(profile.get('inputs', []))} configured")
-    print(f"  Current  : {state.current_input}")
     if args.debug:
         print("  Mode     : DEBUG (raw bytes + full XML)")
     elif args.verbose:
         print("  Mode     : VERBOSE")
-    print("Ready. Press Ctrl-C to stop.\n")
+    print()
+    _print_status(state, model_name)
+    print("\nReady. Press Ctrl-C to stop.\n")
 
     try:
         while True:
             threading.Event().wait(timeout=1)
     except KeyboardInterrupt:
         print("\nShutting down...")
+        _print_status(state, f"{model_name} — final state")
         if ssdp:
             ssdp.stop()
         nstream.shutdown()

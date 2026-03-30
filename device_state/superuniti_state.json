@@ -1,0 +1,112 @@
+{
+  "_comment": "Mutable device state \u2014 auto-saved by naim_emulator_legacy.py",
+  "current_input": "DIGITAL2",
+  "volume": 77,
+  "muted": false,
+  "balance": 0,
+  "max_amp_volume": 100,
+  "max_head_volume": 75,
+  "standby": false,
+  "auto_standby_mins": 20,
+  "illumination": 3,
+  "room_name": "Living Room",
+  "bt_name": "SuperUniti",
+  "bt_security": "OPEN",
+  "bt_auto_reconnect": "OFF",
+  "bt_auto_play": "OFF",
+  "transport_state": "STOPPED",
+  "repeat": "OFF",
+  "random_mode": "OFF",
+  "inputs": {
+    "FM": {
+      "name": "FM",
+      "enabled": false,
+      "trim": 0
+    },
+    "DAB": {
+      "name": "DAB",
+      "enabled": false,
+      "trim": 0
+    },
+    "IRADIO": {
+      "name": "iRadio",
+      "enabled": true,
+      "trim": 0
+    },
+    "MULTIROOM": {
+      "name": "Multiroom",
+      "enabled": false,
+      "trim": 0
+    },
+    "UPNP": {
+      "name": "UPnP",
+      "enabled": true,
+      "trim": 0
+    },
+    "BLUETOOTH": {
+      "name": "Bluetooth",
+      "enabled": true,
+      "trim": 0
+    },
+    "SPOTIFY": {
+      "name": "Spotify",
+      "enabled": true,
+      "trim": 0
+    },
+    "TIDAL": {
+      "name": "Tidal",
+      "enabled": true,
+      "trim": 0
+    },
+    "AIRPLAY": {
+      "name": "AirPlay",
+      "enabled": true,
+      "trim": 0
+    },
+    "DIGITAL1": {
+      "name": "Digital 1",
+      "enabled": true,
+      "trim": 0
+    },
+    "DIGITAL2": {
+      "name": "TV Audio",
+      "enabled": true,
+      "trim": 0
+    },
+    "DIGITAL3": {
+      "name": "Digital 3",
+      "enabled": true,
+      "trim": 0
+    },
+    "DIGITAL4": {
+      "name": "Digital 4",
+      "enabled": false,
+      "trim": 0
+    },
+    "ANALOGUE1": {
+      "name": "Analogue 1",
+      "enabled": true,
+      "trim": 0
+    },
+    "ANALOGUE2": {
+      "name": "Analogue 2",
+      "enabled": true,
+      "trim": 0
+    },
+    "PHONO": {
+      "name": "Phono",
+      "enabled": false,
+      "trim": 0
+    },
+    "USB": {
+      "name": "USB",
+      "enabled": true,
+      "trim": 0
+    },
+    "FRONT": {
+      "name": "Front",
+      "enabled": false,
+      "trim": 0
+    }
+  }
+}
