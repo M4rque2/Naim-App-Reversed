@@ -198,7 +198,7 @@ _BUILTIN_SUPERUNITI = {
     "initial_volume": 30,
     "max_amp_volume": 100,
     "max_head_volume": 75,
-    "initial_input": "UPNP",
+    "initial_input": "DIGITAL1",
     "auto_standby_period": 20,
     "unsupported_nvm": [
         "GETILLUM", "SETILLUM",
@@ -208,12 +208,12 @@ _BUILTIN_SUPERUNITI = {
     "inputs": [
         {"id": "FM",        "name": "FM",         "enabled": False},
         {"id": "DAB",       "name": "DAB",        "enabled": False},
-        {"id": "IRADIO",    "name": "iRadio",     "enabled": True},
+        {"id": "IRADIO",    "name": "iRadio",     "enabled": False},
         {"id": "MULTIROOM", "name": "Multiroom",  "enabled": False},
         {"id": "UPNP",      "name": "UPnP",       "enabled": True},
-        {"id": "BLUETOOTH", "name": "Bluetooth",  "enabled": True},
-        {"id": "SPOTIFY",   "name": "Spotify",    "enabled": True},
-        {"id": "TIDAL",     "name": "Tidal",      "enabled": True},
+        {"id": "BLUETOOTH", "name": "Bluetooth",  "enabled": False},
+        {"id": "SPOTIFY",   "name": "Spotify",    "enabled": False},
+        {"id": "TIDAL",     "name": "Tidal",      "enabled": False},
         {"id": "AIRPLAY",   "name": "AirPlay",    "enabled": True},
         {"id": "DIGITAL1",  "name": "Digital 1",  "enabled": True},
         {"id": "DIGITAL2",  "name": "Digital 2",  "enabled": True},
@@ -908,8 +908,17 @@ def handle_nvm_command(state: DeviceState, raw: str) -> list[str]:
 
     # ── Bluetooth ─────────────────────────────────────────────────────────────
     if cmd == "BTSTATUS":
+        # Response format (from decompiled UnitiBluetoothInputHelper):
+        #   BTSTATUS <busy> <connection> <playing> <codec> [security]
+        # Index 0: BTSTATUS, 1: busy (BUSY/FREE), 2: connection (CON/FREE/PAIR),
+        # 3: playing (PLAYING/STOPPED), 4: codec (SBC/AAC/APTX), 5: security (CLOSED/OPEN)
         with state._lock:
-            return [f"BTSTATUS {state.bt_status}"]
+            busy = "FREE"
+            conn = "FREE"
+            playing = "STOPPED"
+            codec = "SBC"
+            security = state.bt_security  # OPEN or CLOSED
+            return [f"BTSTATUS {busy} {conn} {playing} {codec} {security}"]
 
     if cmd == "BTPAIR":
         return ["BTPAIR OK"]
@@ -967,6 +976,12 @@ def handle_nvm_command(state: DeviceState, raw: str) -> list[str]:
             state.bt_auto_play = args[0].upper()
         return ["SETBTAUTOPLAY OK"]
 
+    if cmd == "BTMETA":
+        # Bluetooth metadata query — arg is metadata field index.
+        # Return empty string to indicate no BT metadata available.
+        idx = args[0] if args else "0"
+        return [f"BTMETA {idx} "]
+
     # ── Presets ───────────────────────────────────────────────────────────────
     if cmd == "GETTOTALPRESETS":
         return ["GETTOTALPRESETS 0"]
@@ -988,6 +1003,19 @@ def handle_nvm_command(state: DeviceState, raw: str) -> list[str]:
         # [1]=preamp_automation [2]=DAC_auto [3]=CD_auto [4]=CDinput [5]=NDXinput
         # "0" values mean those automations are disabled
         return ["GETBLASTCAPS 0 0 0 0 0 0"]
+
+    if cmd == "GETVIEWSTATE":
+        # View state for the current input — Browse, Playing, PlayerStopped, etc.
+        with state._lock:
+            ts = state.transport_state
+        if ts == "PLAYING":
+            return ["GETVIEWSTATE Playing"]
+        else:
+            return ["GETVIEWSTATE Browse"]
+
+    if cmd == "GETBUFFERSTATE":
+        # Buffer state: returns buffering progress (0-100)
+        return ["GETBUFFERSTATE 100"]
 
     if cmd == "GETDATETIME":
         import datetime as _dt
@@ -1011,6 +1039,11 @@ def handle_nvm_command(state: DeviceState, raw: str) -> list[str]:
             current = state.current_input
             product = state.product_code
         return [f"GETINITIALINFO Y 0 0 {product} 0_0_0_0 {current} NA 0 0"]
+
+    # ── Catch-all for unhandled NVM commands ─────────────────────────────────
+    # Returning None would crash _handle_tunnel which iterates over the result.
+    print(f"[{_ts()}] [NVM] UNHANDLED command: {cmd} args={args}")
+    return [f"ERROR: {cmd} 4"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1192,6 +1225,22 @@ class NStreamHandler(socketserver.BaseRequestHandler):
         elif cmd_name == "Ping":
             # Keepalive every 5 s — must reply or the app times out and reconnects
             self._reply_bc_ack("Ping", msg_id)
+        elif cmd_name == "GetUPnPMediaRendererList":
+            # The app asks the device which UPnP renderers it can see on the LAN.
+            # On a real device this returns a list of discovered renderers for
+            # multiroom use.  An empty list is a valid reply — the visitor
+            # (VisitorBCGetUPnPMediaRendererList) reads <item> children from <map>.
+            # An empty <map/> means "no renderers found".
+            self._reply_upnp_renderer_list(msg_id)
+        elif cmd_name == "GetPlaylistStats":
+            # The app queries playlist statistics (track count, etc.) after
+            # connecting.  Reply with an empty/zero playlist.
+            self._reply_playlist_stats(msg_id)
+        elif cmd_name == "GetNowPlaying":
+            # The app queries current now-playing metadata (track, artist, etc.)
+            self._reply_now_playing(msg_id)
+        elif cmd_name == "GetViewState":
+            self._reply_view_state(msg_id)
         elif cmd_name == "TunnelToHost":
             self._handle_tunnel(root, msg_id)
         else:
@@ -1248,6 +1297,88 @@ class NStreamHandler(socketserver.BaseRequestHandler):
         if self._verbose:
             print(f"[{_ts()}] [nStream] #{self._conn_id:04x} >> {cmd_name} ack (id={msg_id})")
 
+    def _reply_upnp_renderer_list(self, msg_id: str):
+        """Reply to GetUPnPMediaRendererList with an empty renderer list.
+
+        VisitorBCGetUPnPMediaRendererList reads <item> children inside <map>.
+        An empty <map/> signals no multiroom renderers discovered.
+        """
+        reply = (
+            f'<reply name="GetUPnPMediaRendererList" id="{msg_id}">'
+            f'<map></map>'
+            f'</reply>'
+        )
+        self._send(reply)
+        if self._verbose:
+            print(f"[{_ts()}] [nStream] #{self._conn_id:04x} >> GetUPnPMediaRendererList (empty list) (id={msg_id})")
+
+    def _reply_playlist_stats(self, msg_id: str):
+        """Reply to GetPlaylistStats with an empty playlist.
+
+        VisitorBCGetPlaylistStats reads 'count' and 'index' from <map>.
+        count=0 means empty playlist, index=0 is current track position.
+        """
+        reply = (
+            f'<reply name="GetPlaylistStats" id="{msg_id}">'
+            f'<map>'
+            f'<item><name>count</name><int>0</int></item>'
+            f'<item><name>index</name><int>0</int></item>'
+            f'</map>'
+            f'</reply>'
+        )
+        self._send(reply)
+        if self._verbose:
+            print(f"[{_ts()}] [nStream] #{self._conn_id:04x} >> GetPlaylistStats (count=0) (id={msg_id})")
+
+    def _reply_now_playing(self, msg_id: str):
+        """Reply to GetNowPlaying with current input info as now-playing metadata.
+
+        VisitorBCGetNowPlaying reads fields from <map>: title, artist, album,
+        artwork, transportState, etc.  For a legacy device with no active stream,
+        return the current input name as the title and "stopped" transport state.
+        """
+        with self._state._lock:
+            inp = self._state.current_input
+            inp_name = self._state._inputs.get(inp, {}).get("name", inp)
+            ts = self._state.transport_state.lower()  # app expects lowercase
+        reply = (
+            f'<reply name="GetNowPlaying" id="{msg_id}">'
+            f'<map>'
+            f'<item><name>title</name><string>{inp_name}</string></item>'
+            f'<item><name>transportState</name><string>{ts}</string></item>'
+            f'<item><name>canSeek</name><int>0</int></item>'
+            f'<item><name>canNext</name><int>0</int></item>'
+            f'<item><name>canPrev</name><int>0</int></item>'
+            f'</map>'
+            f'</reply>'
+        )
+        self._send(reply)
+        if self._verbose:
+            print(f"[{_ts()}] [nStream] #{self._conn_id:04x} >> GetNowPlaying (title={inp_name!r}, state={ts}) (id={msg_id})")
+
+    def _reply_view_state(self, msg_id: str):
+        """Reply to GetViewState with the current view state.
+
+        VisitorBCGetViewState reads <item name="state" string="..."/> from <map>.
+        Valid states: Browse, Playing, PlayerStopped, PlayerCanRestart, etc.
+        """
+        with self._state._lock:
+            ts = self._state.transport_state
+        if ts == "PLAYING":
+            view_state = "Playing"
+        else:
+            view_state = "Browse"
+        reply = (
+            f'<reply name="GetViewState" id="{msg_id}">'
+            f'<map>'
+            f'<item><name>state</name><string>{view_state}</string></item>'
+            f'</map>'
+            f'</reply>'
+        )
+        self._send(reply)
+        if self._verbose:
+            print(f"[{_ts()}] [nStream] #{self._conn_id:04x} >> GetViewState (state={view_state}) (id={msg_id})")
+
     def _handle_tunnel(self, root: ET.Element, msg_id: str):
         """Decode a TunnelToHost NVM command, execute it, send TunnelFromHost reply."""
         b64_el = root.find(".//base64")
@@ -1266,6 +1397,8 @@ class NStreamHandler(socketserver.BaseRequestHandler):
             print(f"[{_ts()}] [nStream] #{self._conn_id:04x} NVM<< {nvm_raw!r}")
 
         responses = handle_nvm_command(self._state, nvm_raw)
+        if not responses:
+            return
 
         for resp in responses:
             line = f"#NVM {resp}\r\n"
@@ -1456,8 +1589,97 @@ def _parse_soap_action(body: bytes) -> tuple[str, str, dict]:
     return service_type, action_name, args
 
 
+_SCPD_XML = {
+    "/AVTransport/scpd.xml": """<?xml version="1.0" encoding="utf-8"?>
+<scpd xmlns="urn:schemas-upnp-org:service-1-0">
+  <specVersion><major>1</major><minor>0</minor></specVersion>
+  <actionList>
+    <action><name>Play</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument><argument><name>Speed</name><direction>in</direction><relatedStateVariable>TransportPlaySpeed</relatedStateVariable></argument></argumentList></action>
+    <action><name>Pause</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument></argumentList></action>
+    <action><name>Stop</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument></argumentList></action>
+    <action><name>Next</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument></argumentList></action>
+    <action><name>Previous</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument></argumentList></action>
+    <action><name>Seek</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument><argument><name>Unit</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_SeekMode</relatedStateVariable></argument><argument><name>Target</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_SeekTarget</relatedStateVariable></argument></argumentList></action>
+    <action><name>SetAVTransportURI</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument><argument><name>CurrentURI</name><direction>in</direction><relatedStateVariable>AVTransportURI</relatedStateVariable></argument><argument><name>CurrentURIMetaData</name><direction>in</direction><relatedStateVariable>AVTransportURIMetaData</relatedStateVariable></argument></argumentList></action>
+    <action><name>GetTransportInfo</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument><argument><name>CurrentTransportState</name><direction>out</direction><relatedStateVariable>TransportState</relatedStateVariable></argument><argument><name>CurrentTransportStatus</name><direction>out</direction><relatedStateVariable>TransportStatus</relatedStateVariable></argument><argument><name>CurrentSpeed</name><direction>out</direction><relatedStateVariable>TransportPlaySpeed</relatedStateVariable></argument></argumentList></action>
+    <action><name>GetPositionInfo</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument><argument><name>Track</name><direction>out</direction><relatedStateVariable>CurrentTrack</relatedStateVariable></argument><argument><name>TrackDuration</name><direction>out</direction><relatedStateVariable>CurrentTrackDuration</relatedStateVariable></argument><argument><name>TrackMetaData</name><direction>out</direction><relatedStateVariable>CurrentTrackMetaData</relatedStateVariable></argument><argument><name>TrackURI</name><direction>out</direction><relatedStateVariable>CurrentTrackURI</relatedStateVariable></argument><argument><name>RelTime</name><direction>out</direction><relatedStateVariable>RelativeTimePosition</relatedStateVariable></argument><argument><name>AbsTime</name><direction>out</direction><relatedStateVariable>AbsoluteTimePosition</relatedStateVariable></argument><argument><name>RelCount</name><direction>out</direction><relatedStateVariable>RelativeCounterPosition</relatedStateVariable></argument><argument><name>AbsCount</name><direction>out</direction><relatedStateVariable>AbsoluteCounterPosition</relatedStateVariable></argument></argumentList></action>
+    <action><name>GetMediaInfo</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument><argument><name>NrTracks</name><direction>out</direction><relatedStateVariable>NumberOfTracks</relatedStateVariable></argument><argument><name>MediaDuration</name><direction>out</direction><relatedStateVariable>CurrentMediaDuration</relatedStateVariable></argument><argument><name>CurrentURI</name><direction>out</direction><relatedStateVariable>AVTransportURI</relatedStateVariable></argument><argument><name>CurrentURIMetaData</name><direction>out</direction><relatedStateVariable>AVTransportURIMetaData</relatedStateVariable></argument><argument><name>NextURI</name><direction>out</direction><relatedStateVariable>NextAVTransportURI</relatedStateVariable></argument><argument><name>NextURIMetaData</name><direction>out</direction><relatedStateVariable>NextAVTransportURIMetaData</relatedStateVariable></argument><argument><name>PlayMedium</name><direction>out</direction><relatedStateVariable>PlaybackStorageMedium</relatedStateVariable></argument><argument><name>RecordMedium</name><direction>out</direction><relatedStateVariable>RecordStorageMedium</relatedStateVariable></argument><argument><name>WriteStatus</name><direction>out</direction><relatedStateVariable>RecordMediumWriteStatus</relatedStateVariable></argument></argumentList></action>
+  </actionList>
+  <serviceStateTable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_InstanceID</name><dataType>ui4</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_SeekMode</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_SeekTarget</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="yes"><name>TransportState</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>TransportStatus</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>TransportPlaySpeed</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>CurrentTrack</name><dataType>ui4</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>CurrentTrackDuration</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>CurrentTrackMetaData</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>CurrentTrackURI</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>RelativeTimePosition</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>AbsoluteTimePosition</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>RelativeCounterPosition</name><dataType>i4</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>AbsoluteCounterPosition</name><dataType>i4</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>NumberOfTracks</name><dataType>ui4</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>CurrentMediaDuration</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>AVTransportURI</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>AVTransportURIMetaData</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>NextAVTransportURI</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>NextAVTransportURIMetaData</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>PlaybackStorageMedium</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>RecordStorageMedium</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>RecordMediumWriteStatus</name><dataType>string</dataType></stateVariable>
+  </serviceStateTable>
+</scpd>""",
+
+    "/RenderingControl/scpd.xml": """<?xml version="1.0" encoding="utf-8"?>
+<scpd xmlns="urn:schemas-upnp-org:service-1-0">
+  <specVersion><major>1</major><minor>0</minor></specVersion>
+  <actionList>
+    <action><name>GetVolume</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument><argument><name>Channel</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Channel</relatedStateVariable></argument><argument><name>CurrentVolume</name><direction>out</direction><relatedStateVariable>Volume</relatedStateVariable></argument></argumentList></action>
+    <action><name>SetVolume</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument><argument><name>Channel</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Channel</relatedStateVariable></argument><argument><name>DesiredVolume</name><direction>in</direction><relatedStateVariable>Volume</relatedStateVariable></argument></argumentList></action>
+    <action><name>GetMute</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument><argument><name>Channel</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Channel</relatedStateVariable></argument><argument><name>CurrentMute</name><direction>out</direction><relatedStateVariable>Mute</relatedStateVariable></argument></argumentList></action>
+    <action><name>SetMute</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument><argument><name>Channel</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Channel</relatedStateVariable></argument><argument><name>DesiredMute</name><direction>in</direction><relatedStateVariable>Mute</relatedStateVariable></argument></argumentList></action>
+  </actionList>
+  <serviceStateTable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_InstanceID</name><dataType>ui4</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_Channel</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="yes"><name>Volume</name><dataType>ui2</dataType><allowedValueRange><minimum>0</minimum><maximum>100</maximum><step>1</step></allowedValueRange></stateVariable>
+    <stateVariable sendEvents="yes"><name>Mute</name><dataType>boolean</dataType></stateVariable>
+  </serviceStateTable>
+</scpd>""",
+
+    "/ConnectionManager/scpd.xml": """<?xml version="1.0" encoding="utf-8"?>
+<scpd xmlns="urn:schemas-upnp-org:service-1-0">
+  <specVersion><major>1</major><minor>0</minor></specVersion>
+  <actionList>
+    <action><name>GetProtocolInfo</name><argumentList><argument><name>Source</name><direction>out</direction><relatedStateVariable>SourceProtocolInfo</relatedStateVariable></argument><argument><name>Sink</name><direction>out</direction><relatedStateVariable>SinkProtocolInfo</relatedStateVariable></argument></argumentList></action>
+    <action><name>GetCurrentConnectionIDs</name><argumentList><argument><name>ConnectionIDs</name><direction>out</direction><relatedStateVariable>CurrentConnectionIDs</relatedStateVariable></argument></argumentList></action>
+    <action><name>GetCurrentConnectionInfo</name><argumentList><argument><name>ConnectionID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ConnectionID</relatedStateVariable></argument><argument><name>RcsID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_RcsID</relatedStateVariable></argument><argument><name>AVTransportID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_AVTransportID</relatedStateVariable></argument><argument><name>ProtocolInfo</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ProtocolInfo</relatedStateVariable></argument><argument><name>PeerConnectionManager</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionManager</relatedStateVariable></argument><argument><name>PeerConnectionID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionID</relatedStateVariable></argument><argument><name>Direction</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Direction</relatedStateVariable></argument><argument><name>Status</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionStatus</relatedStateVariable></argument></argumentList></action>
+  </actionList>
+  <serviceStateTable>
+    <stateVariable sendEvents="yes"><name>SourceProtocolInfo</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="yes"><name>SinkProtocolInfo</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="yes"><name>CurrentConnectionIDs</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_ConnectionID</name><dataType>i4</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_RcsID</name><dataType>i4</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_AVTransportID</name><dataType>i4</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_ProtocolInfo</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_ConnectionManager</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_Direction</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_ConnectionStatus</name><dataType>string</dataType></stateVariable>
+  </serviceStateTable>
+</scpd>""",
+}
+
+
 class UPnPHandler(BaseHTTPRequestHandler):
     """Handles HTTP requests for the UPnP/DLNA service."""
+
+    # ── Minimal SCPD (Service Control Protocol Description) documents ────────
+    # The Naim app fetches these after discovering the device via SSDP.
+    # Without them, the UPnP service registration fails and the app falls
+    # back to repeated discovery loops.
 
     # Suppress default request log unless verbose/debug
     def log_message(self, fmt, *args):
@@ -1470,14 +1692,19 @@ class UPnPHandler(BaseHTTPRequestHandler):
             xml = _build_description_xml(
                 self.server.device_state, self.server.server_address[1]
             ).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/xml; charset=utf-8")
-            self.send_header("Content-Length", str(len(xml)))
-            self.end_headers()
-            self.wfile.write(xml)
+            self._send_xml(xml)
+        elif path in _SCPD_XML:
+            self._send_xml(_SCPD_XML[path].encode("utf-8"))
         else:
             self.send_response(404)
             self.end_headers()
+
+    def _send_xml(self, xml: bytes):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/xml; charset=utf-8")
+        self.send_header("Content-Length", str(len(xml)))
+        self.end_headers()
+        self.wfile.write(xml)
 
     def do_POST(self):
         path = self.path.split("?")[0]
@@ -1502,6 +1729,25 @@ class UPnPHandler(BaseHTTPRequestHandler):
             print(f"[{_ts()}] [UPnP]    SOAP {path} action={action!r} args={args}")
 
         handler(action, args)
+
+    def do_SUBSCRIBE(self):
+        """Handle UPnP GENA event subscription requests.
+
+        The Naim app subscribes to AVTransport, RenderingControl and
+        ConnectionManager event URLs after discovering services.  Return
+        a minimal valid SUBSCRIBE response with a fake SID to keep the
+        app happy.  We don't actually push events (yet).
+        """
+        import uuid as _uuid
+        path = self.path.split("?")[0]
+        sid  = f"uuid:{_uuid.uuid4()}"
+        if self.server.verbose or self.server.debug:
+            print(f"[{_ts()}] [UPnP]    SUBSCRIBE {path}  -> SID={sid}")
+        self.send_response(200)
+        self.send_header("SID", sid)
+        self.send_header("TIMEOUT", "Second-1800")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     # ── AVTransport ───────────────────────────────────────────────────────────
 

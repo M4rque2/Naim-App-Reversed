@@ -1,7 +1,7 @@
 {
   "_comment": "Mutable device state \u2014 auto-saved by naim_emulator_legacy.py",
-  "current_input": "DIGITAL2",
-  "volume": 77,
+  "current_input": "USB",
+  "volume": 30,
   "muted": false,
   "balance": 0,
   "max_amp_volume": 100,
@@ -30,7 +30,7 @@
     },
     "IRADIO": {
       "name": "iRadio",
-      "enabled": true,
+      "enabled": false,
       "trim": 0
     },
     "MULTIROOM": {
@@ -45,17 +45,17 @@
     },
     "BLUETOOTH": {
       "name": "Bluetooth",
-      "enabled": true,
+      "enabled": false,
       "trim": 0
     },
     "SPOTIFY": {
       "name": "Spotify",
-      "enabled": true,
+      "enabled": false,
       "trim": 0
     },
     "TIDAL": {
       "name": "Tidal",
-      "enabled": true,
+      "enabled": false,
       "trim": 0
     },
     "AIRPLAY": {
@@ -69,7 +69,7 @@
       "trim": 0
     },
     "DIGITAL2": {
-      "name": "TV Audio",
+      "name": "Digital 2",
       "enabled": true,
       "trim": 0
     },
